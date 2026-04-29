@@ -47,9 +47,46 @@ const BOTTOM_TABS = [
   { id: 'settings',      label: 'Настройки',         icon: <Settings size={18} /> },
 ];
 
+/** Pierce shadow roots so focus inside web components is detected (Electron quirks). */
+function getDeepActiveElement(doc: Document): HTMLElement | null {
+  let el = doc.activeElement as HTMLElement | null;
+  while (el?.shadowRoot?.activeElement) {
+    el = el.shadowRoot.activeElement as HTMLElement;
+  }
+  return el;
+}
+
+function isEditableHTMLElement(el: HTMLElement | null): boolean {
+  if (!el) return false;
+  if (el.hasAttribute('disabled')) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  if (tag === 'INPUT') {
+    const inp = el as HTMLInputElement;
+    const t = inp.type?.toLowerCase() ?? 'text';
+    if (['hidden', 'button', 'submit', 'reset', 'file', 'image'].includes(t)) return false;
+    return true;
+  }
+  return false;
+}
+
+/** True when the keystroke must not feed the barcode scanner buffer (typing / IME). */
+function keyboardEventTargetsEditable(event: KeyboardEvent): boolean {
+  if (event.isComposing || event.key === 'Process') return true;
+  if (isEditableHTMLElement(getDeepActiveElement(document))) return true;
+  const path =
+    typeof event.composedPath === 'function' ? event.composedPath() : [event.target];
+  for (const node of path) {
+    if (node instanceof HTMLElement && isEditableHTMLElement(node)) return true;
+  }
+  return false;
+}
+
 const App: React.FC = () => {
   const store = useStore();
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [settingsSubTab, setSettingsSubTab] = useState('printer');
   const [showAbout, setShowAbout] = useState(false);
   const scanBufferRef = useRef('');
   const lastScanKeyRef = useRef(0);
@@ -57,6 +94,8 @@ const App: React.FC = () => {
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.ctrlKey || event.altKey || event.metaKey) return;
+      // If user types in any focused input/control, scanner capture must stay completely silent.
+      if (keyboardEventTargetsEditable(event)) return;
 
       const now = Date.now();
       if (now - lastScanKeyRef.current > 120) {
@@ -78,9 +117,15 @@ const App: React.FC = () => {
       }
     };
 
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
+    // Bubble phase avoids stealing key events from focused controls in edge cases after modal unmount.
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
+
+  const openPrinterSettings = () => {
+    setSettingsSubTab('printer');
+    setActiveTab('settings');
+  };
 
   const renderContent = () => {
     switch (activeTab) {
@@ -93,7 +138,7 @@ const App: React.FC = () => {
       case 'printing':       return <PrintingTab store={store} />;
       case 'refilllog':      return <RefillLogTab store={store} />;
       case 'import':         return <ImportTab store={store} />;
-      case 'settings':       return <SettingsTab store={store} />;
+      case 'settings':       return <SettingsTab store={store} initialSubTab={settingsSubTab} />;
       default:               return <Dashboard store={store} onNavigate={setActiveTab} />;
     }
   };
@@ -145,13 +190,21 @@ const App: React.FC = () => {
             </div>
           )}
           {store.settings.labelPrinterName ? (
-            <div className="bg-green-600 text-white px-2.5 py-1 rounded-full text-xs font-bold">
+            <button
+              onClick={openPrinterSettings}
+              className="bg-green-600 hover:bg-green-500 text-white px-2.5 py-1 rounded-full text-xs font-bold"
+              title="Открыть настройки принтера"
+            >
               🖨 {store.settings.labelPrinterName}
-            </div>
+            </button>
           ) : (
-            <div className="bg-orange-500 text-white px-2.5 py-1 rounded-full text-xs font-bold">
+            <button
+              onClick={openPrinterSettings}
+              className="bg-orange-500 hover:bg-orange-400 text-white px-2.5 py-1 rounded-full text-xs font-bold"
+              title="Настроить принтер"
+            >
               ⚠ Принтер не выбран
-            </div>
+            </button>
           )}
           <button
             onClick={() => setShowAbout(true)}
@@ -189,7 +242,7 @@ const App: React.FC = () => {
         </nav>
 
         {/* Main Content */}
-        <main className="flex-1 overflow-auto p-5">
+        <main className={`flex-1 p-5 ${activeTab === 'refilllog' ? 'overflow-hidden' : 'overflow-auto'}`}>
           {renderContent()}
         </main>
       </div>

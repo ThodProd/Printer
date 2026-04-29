@@ -1,5 +1,5 @@
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import {
   Printer,
   Cartridge,
@@ -15,6 +15,21 @@ import {
   ConsumableType,
   NewCartridge,
 } from './types';
+
+const LEGACY_DEFAULT_TSPL = `CLS
+CODEPAGE 1251
+SIZE 43 mm, 15 mm
+GAP 3 mm, 0 mm
+DENSITY 10
+SPEED 4
+DIRECTION 0,0
+REFERENCE 0,0
+BARCODE 41,13,"128",36,0,0,2,2,"{id}"
+TEXT 101,60,"1",0,1,1,"{id}"
+TEXT 101,85,"2",0,1,1,"{inv}"
+PRINT 1,1
+CLS
+INITIALPRINTER`;
 
 interface DatabaseData {
   version: 1;
@@ -64,13 +79,72 @@ function useDebouncedDatabase(data: DatabaseData, hydrated: boolean) {
   }, [data, hydrated]);
 }
 
-/** Generate a short 6-char alphanumeric ID with type prefix: e.g. "C-AB3F7K" */
-function generateShortId(prefix: string): string {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  let rand = '';
-  for (let i = 0; i < 6; i++) {
-    rand += chars[Math.floor(Math.random() * chars.length)];
+function migrateSettings(s: Partial<AppSettings>): AppSettings {
+  const merged = { ...DEFAULT_SETTINGS, ...s };
+  if (typeof merged.labelTsplTemplate === 'string') {
+    merged.labelTsplTemplate = merged.labelTsplTemplate.replace(
+      /^(TEXT\s+[^,\r\n]+(?:,[^,\r\n]+){5},)"П"\s*$/gim,
+      '$1"{fw}"',
+    );
   }
+  if ((merged.labelTsplTemplate ?? '').trim() === LEGACY_DEFAULT_TSPL.trim()) {
+    merged.labelTsplTemplate = DEFAULT_SETTINGS.labelTsplTemplate;
+  }
+  return merged;
+}
+
+function stripLastMatchingRefillLog(
+  prev: RefillLogEntry[],
+  predicate: (e: RefillLogEntry) => boolean,
+): RefillLogEntry[] {
+  for (let i = prev.length - 1; i >= 0; i--) {
+    if (predicate(prev[i])) return prev.filter((_, j) => j !== i);
+  }
+  return prev;
+}
+
+/** Строка журнала о приёме в очередь «ожидает отправки» — убирается при отмене из списка на складе. */
+function isRefillLogWaitingAcceptEntry(e: RefillLogEntry): boolean {
+  const a = e.action;
+  if (e.serviceType != null && e.serviceType !== 'accept') return false;
+  return (
+    a === 'Принят на склад (сдан на заправку)' ||
+    a === 'Принят на склад (вместе с принтером)' ||
+    a === 'Зарегистрирован. Принят на склад ожидания.' ||
+    (e.consumableType === 'device' && a.includes('Принят на склад') && a.includes('ожидание'))
+  );
+}
+
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+function hashToCode(input: string, length = 6): string {
+  // Deterministic pseudo-hash (fast, stable across sessions)
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let i = 0; i < input.length; i++) {
+    const c = input.charCodeAt(i);
+    h1 ^= c;
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= c + ((h2 << 5) >>> 0) + (h2 >>> 2);
+    h2 >>>= 0;
+  }
+  const out: string[] = [];
+  for (let i = 0; i < length; i++) {
+    const mixed = (h1 ^ (h2 >>> (i % 16))) >>> 0;
+    out.push(ALPHABET[mixed % ALPHABET.length]);
+    h1 = Math.imul(h1 ^ mixed, 0x45d9f3b) >>> 0;
+    h2 = Math.imul(h2 ^ (mixed >>> 1), 0x27d4eb2d) >>> 0;
+  }
+  return out.join('');
+}
+
+function generateDeterministicId(prefix: 'P' | 'C' | 'D' | 'N', base: string): string {
+  return `${prefix}-${hashToCode(`${prefix}:${base}`)}`;
+}
+
+function generateRandomId(prefix: 'P' | 'C' | 'D' | 'N'): string {
+  let rand = '';
+  for (let i = 0; i < 6; i++) rand += ALPHABET[Math.floor(Math.random() * ALPHABET.length)];
   return `${prefix}-${rand}`;
 }
 
@@ -81,7 +155,7 @@ function normalizeInventoryNumber(value: string): string {
 function migratePrinter(p: Partial<Printer> & { inventoryNumber: string }): Printer {
   const inventoryNumber = normalizeInventoryNumber(p.inventoryNumber);
   return {
-    programId: (p as any).programId ?? generateShortId('P'),
+    programId: (p as any).programId ?? generateDeterministicId('P', inventoryNumber),
     inventoryNumber,
     model: p.model ?? '',
     printerType: (p as any).printerType ?? 'printer',
@@ -90,10 +164,24 @@ function migratePrinter(p: Partial<Printer> & { inventoryNumber: string }): Prin
     cartridgeModels: p.cartridgeModels ?? [],
     commissionDate: p.commissionDate ?? '',
     balanceCost: p.balanceCost ?? '',
+    refillCount: (p as any).refillCount ?? 0,
+    repairCount: (p as any).repairCount ?? 0,
+    firmwareFlashed: (p as any).firmwareFlashed === true,
+    ...(Number.isFinite((p as any).consumableCartridgeSeq)
+      ? { consumableCartridgeSeq: (p as any).consumableCartridgeSeq as number }
+      : {}),
+    ...(Number.isFinite((p as any).consumableDrumSeq)
+      ? { consumableDrumSeq: (p as any).consumableDrumSeq as number }
+      : {}),
   };
 }
 
 function migrateCartridge(c: Partial<Cartridge> & { id: string }): Cartridge {
+  const rawStatus = c.status ?? 'on_hand';
+  const migratedStatus =
+    (c.isReplaced || !!c.replacedById) && (rawStatus === 'on_hand' || rawStatus === 'replaced')
+      ? 'disposed'
+      : rawStatus;
   return {
     id: c.id,
     barcode: c.barcode ?? c.id,
@@ -101,14 +189,96 @@ function migrateCartridge(c: Partial<Cartridge> & { id: string }): Cartridge {
     consumableType: (c as any).consumableType ?? 'cartridge',
     color: (c as any).color,
     printerInventoryNumber: normalizeInventoryNumber(c.printerInventoryNumber ?? ''),
-    status: c.status ?? 'on_hand',
+    status: migratedStatus,
     history: c.history ?? [],
     isReplaced: c.isReplaced ?? false,
     replacedById: c.replacedById,
     refillCount: c.refillCount ?? 0,
     registrationDate: c.registrationDate ?? (c.history?.[0]?.date ?? new Date().toISOString()),
     lastSubmittedBy: (c as any).lastSubmittedBy,
+    linkedRepairId: (c as any).linkedRepairId,
+    ...(Number.isFinite((c as any).consumableSlot)
+      ? { consumableSlot: (c as any).consumableSlot as number }
+      : {}),
   };
+}
+
+/** Однократно: проставить consumableSlot и синхронизировать счётчики на принтере с уже существующими расходниками. */
+export function migrateConsumableSlots(
+  cartridges: Cartridge[],
+  printers: Printer[],
+): { cartridges: Cartridge[]; printers: Printer[]; changed: boolean } {
+  const byKey = new Map<string, Cartridge[]>();
+  for (const c of cartridges) {
+    const inv = normalizeInventoryNumber(c.printerInventoryNumber);
+    if (!inv) continue;
+    const type = c.consumableType ?? 'cartridge';
+    const key = `${inv}\0${type}`;
+    let arr = byKey.get(key);
+    if (!arr) {
+      arr = [];
+      byKey.set(key, arr);
+    }
+    arr.push(c);
+  }
+  const idToPatched = new Map<string, Cartridge>();
+  for (const [, group] of byKey) {
+    const sorted = [...group].sort(
+      (a, b) => new Date(a.registrationDate).getTime() - new Date(b.registrationDate).getTime(),
+    );
+    sorted.forEach((c, i) => {
+      if (c.consumableSlot != null) return;
+      idToPatched.set(c.id, { ...c, consumableSlot: i + 1 });
+    });
+  }
+  let changed = idToPatched.size > 0;
+  const newCartridges = cartridges.map(c => idToPatched.get(c.id) ?? c);
+
+  const maxByPrinter = new Map<string, { cart: number; drum: number }>();
+  for (const c of newCartridges) {
+    const inv = normalizeInventoryNumber(c.printerInventoryNumber);
+    if (!inv) continue;
+    const slot = c.consumableSlot;
+    if (slot == null || !Number.isFinite(slot)) continue;
+    const cur = maxByPrinter.get(inv) ?? { cart: 0, drum: 0 };
+    if (c.consumableType === 'drum') cur.drum = Math.max(cur.drum, slot);
+    else cur.cart = Math.max(cur.cart, slot);
+    maxByPrinter.set(inv, cur);
+  }
+
+  const newPrinters = printers.map(p => {
+    const m = maxByPrinter.get(p.inventoryNumber) ?? { cart: 0, drum: 0 };
+    const nextCart = Math.max(p.consumableCartridgeSeq ?? 0, m.cart);
+    const nextDrum = Math.max(p.consumableDrumSeq ?? 0, m.drum);
+    if (nextCart === (p.consumableCartridgeSeq ?? 0) && nextDrum === (p.consumableDrumSeq ?? 0)) return p;
+    changed = true;
+    return { ...p, consumableCartridgeSeq: nextCart, consumableDrumSeq: nextDrum };
+  });
+
+  return { cartridges: newCartridges, printers: newPrinters, changed };
+}
+
+/** Сколько элементов обрабатывать за один кадр; между чанками — yield, чтобы не блокировать ввод с клавиатуры. */
+const MIGRATE_CHUNK = 400;
+
+async function mapInChunks<T, R>(
+  items: T[],
+  mapFn: (item: T) => R,
+  chunkSize: number,
+  isCancelled: () => boolean,
+): Promise<R[] | null> {
+  const result: R[] = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    if (isCancelled()) return null;
+    const end = Math.min(i + chunkSize, items.length);
+    for (let j = i; j < end; j++) {
+      result.push(mapFn(items[j]));
+    }
+    if (end < items.length) {
+      await new Promise<void>(resolve => window.setTimeout(resolve, 0));
+    }
+  }
+  return result;
 }
 
 export const useStore = () => {
@@ -123,6 +293,11 @@ export const useStore = () => {
     return readLocalStorage<(Partial<Cartridge> & { id: string })[]>('cartridges', []).map(migrateCartridge);
   });
 
+  const cartridgesRef = useRef(cartridges);
+  const printersRef = useRef(printers);
+  cartridgesRef.current = cartridges;
+  printersRef.current = printers;
+
   const [repairs, setRepairs] = useState<RepairEntry[]>(() => {
     if (shouldUseFileDatabase()) return [];
     return readLocalStorage<RepairEntry[]>('repairs', []);
@@ -135,7 +310,7 @@ export const useStore = () => {
 
   const [settings, setSettingsState] = useState<AppSettings>(() => {
     if (shouldUseFileDatabase()) return { ...DEFAULT_SETTINGS };
-    return { ...DEFAULT_SETTINGS, ...readLocalStorage<Partial<AppSettings>>('app_settings', {}) };
+    return migrateSettings(readLocalStorage<Partial<AppSettings>>('app_settings', {}));
   });
 
   const setSettings = (next: AppSettings) => {
@@ -156,40 +331,114 @@ export const useStore = () => {
     if (shouldUseFileDatabase()) return [];
     return readLocalStorage<NewCartridge[]>('new_cartridges', []);
   });
+  const [dbProcessing, setDbProcessing] = useState<{
+    visible: boolean;
+    done: boolean;
+    progress: number;
+    text: string;
+  }>({
+    visible: shouldUseFileDatabase(),
+    done: false,
+    progress: shouldUseFileDatabase() ? 1 : 100,
+    text: shouldUseFileDatabase() ? 'Обработка базы...' : '',
+  });
 
   useEffect(() => {
     if (!window.electronAPI?.loadDatabase) return;
     let cancelled = false;
-    window.electronAPI.loadDatabase()
-      .then(result => {
+    const progressSteps = [8, 18, 30, 45, 58, 72, 85, 94];
+    const setProgressAt = (idx: number) => {
+      if (cancelled) return;
+      setDbProcessing({
+        visible: true,
+        done: false,
+        progress: progressSteps[Math.min(idx, progressSteps.length - 1)],
+        text: 'Обработка базы...',
+      });
+    };
+
+    (async () => {
+      try {
+        setProgressAt(0);
+        const result = await window.electronAPI.loadDatabase();
         if (cancelled) return;
         if (result.success && result.data) {
           const db = result.data as Partial<DatabaseData>;
-          setPrinters(((db.printers ?? []) as (Partial<Printer> & { inventoryNumber: string })[]).map(migratePrinter));
-          setCartridges(((db.cartridges ?? []) as (Partial<Cartridge> & { id: string })[]).map(migrateCartridge));
+          const rawPrinters = (db.printers ?? []) as (Partial<Printer> & { inventoryNumber: string })[];
+          const migratedPrinters = await mapInChunks(rawPrinters, migratePrinter, MIGRATE_CHUNK, () => cancelled);
+          if (migratedPrinters === null) return;
+          setPrinters(migratedPrinters);
+          setProgressAt(1);
+          const rawCartridges = (db.cartridges ?? []) as (Partial<Cartridge> & { id: string })[];
+          const migratedCartridges = await mapInChunks(rawCartridges, migrateCartridge, MIGRATE_CHUNK, () => cancelled);
+          if (migratedCartridges === null) return;
+          setCartridges(migratedCartridges);
+          setProgressAt(2);
           setRepairs((db.repairs ?? []) as RepairEntry[]);
+          setProgressAt(3);
           setBatches((db.batches ?? []) as RefillBatch[]);
-          setSettingsState({ ...DEFAULT_SETTINGS, ...(db.settings ?? {}) });
+          setProgressAt(4);
+          setSettingsState(migrateSettings(db.settings ?? {}));
+          setProgressAt(5);
           setEmployees((db.employees ?? []) as EmployeeRecord[]);
           setRefillLog((db.refillLog ?? []) as RefillLogEntry[]);
           setNewCartridges((db.newCartridges ?? []) as NewCartridge[]);
+          setProgressAt(6);
         } else {
-          setPrinters(readLocalStorage<(Partial<Printer> & { inventoryNumber: string })[]>('printers', []).map(migratePrinter));
-          setCartridges(readLocalStorage<(Partial<Cartridge> & { id: string })[]>('cartridges', []).map(migrateCartridge));
+          const rawPrinters = readLocalStorage<(Partial<Printer> & { inventoryNumber: string })[]>('printers', []);
+          const migratedPrinters = await mapInChunks(rawPrinters, migratePrinter, MIGRATE_CHUNK, () => cancelled);
+          if (migratedPrinters === null) return;
+          setPrinters(migratedPrinters);
+          setProgressAt(1);
+          const rawCartridges = readLocalStorage<(Partial<Cartridge> & { id: string })[]>('cartridges', []);
+          const migratedCartridges = await mapInChunks(rawCartridges, migrateCartridge, MIGRATE_CHUNK, () => cancelled);
+          if (migratedCartridges === null) return;
+          setCartridges(migratedCartridges);
+          setProgressAt(2);
           setRepairs(readLocalStorage<RepairEntry[]>('repairs', []));
+          setProgressAt(3);
           setBatches(readLocalStorage<RefillBatch[]>('batches', []));
-          setSettingsState({ ...DEFAULT_SETTINGS, ...readLocalStorage<Partial<AppSettings>>('app_settings', {}) });
+          setProgressAt(4);
+          setSettingsState(migrateSettings(readLocalStorage<Partial<AppSettings>>('app_settings', {})));
+          setProgressAt(5);
           setEmployees(readLocalStorage<EmployeeRecord[]>('employees', []));
           setRefillLog(readLocalStorage<RefillLogEntry[]>('refill_log', []));
           setNewCartridges(readLocalStorage<NewCartridge[]>('new_cartridges', []));
+          setProgressAt(6);
         }
         setHydrated(true);
-      })
-      .catch(() => {
-        if (!cancelled) setHydrated(true);
-      });
+        setDbProcessing({
+          visible: true,
+          done: true,
+          progress: 100,
+          text: 'Обработка завершилась',
+        });
+        window.setTimeout(() => {
+          if (!cancelled) {
+            setDbProcessing(prev => ({ ...prev, visible: false }));
+          }
+        }, 1800);
+      } catch {
+        if (!cancelled) {
+          setHydrated(true);
+          setDbProcessing(prev => ({ ...prev, visible: false }));
+        }
+      }
+    })();
     return () => { cancelled = true; };
   }, []);
+
+  const consumableSlotMigratedRef = useRef(false);
+  useEffect(() => {
+    if (!hydrated) return;
+    if (consumableSlotMigratedRef.current) return;
+    consumableSlotMigratedRef.current = true;
+    const { cartridges: nextC, printers: nextP, changed } = migrateConsumableSlots(cartridges, printers);
+    if (changed) {
+      setCartridges(nextC);
+      setPrinters(nextP);
+    }
+  }, [hydrated, cartridges, printers]);
 
   const database: DatabaseData = useMemo(() => ({
     version: 1,
@@ -211,46 +460,164 @@ export const useStore = () => {
     const withProgramId: Printer = {
       ...printer,
       inventoryNumber,
-      programId: printer.programId ?? generateShortId('P'),
+      programId: printer.programId ?? generateDeterministicId('P', inventoryNumber),
     };
     setPrinters(prev => [
       ...prev.filter(p => p.inventoryNumber !== inventoryNumber),
       withProgramId,
     ]);
+    setRefillLog(prev => [...prev, {
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: withProgramId.programId ?? withProgramId.inventoryNumber,
+      cartridgeModel: withProgramId.model,
+      consumableType: 'device',
+      deviceType: withProgramId.printerType,
+      serviceType: 'system',
+      printerInventoryNumber: withProgramId.inventoryNumber,
+      printerModel: withProgramId.model,
+      department: withProgramId.department,
+      employee: withProgramId.boss,
+      action: 'Добавлен принтер',
+    }]);
   };
 
   const removePrinter = (inventoryNumber: string) => {
+    const printer = printers.find(p => p.inventoryNumber === inventoryNumber);
+    if (printer) {
+      setRefillLog(prev => [
+        {
+          id: Math.random().toString(36).substr(2, 9),
+          date: new Date().toISOString(),
+          cartridgeId: printer.programId ?? printer.inventoryNumber,
+          cartridgeModel: printer.model,
+          consumableType: 'device',
+          deviceType: printer.printerType,
+          serviceType: 'writeoff',
+          printerInventoryNumber: printer.inventoryNumber,
+          printerModel: printer.model,
+          department: printer.department,
+          employee: printer.boss,
+          action: 'Устройство удалено/списано',
+        },
+        ...prev,
+      ]);
+    }
     setPrinters(prev => prev.filter(p => p.inventoryNumber !== inventoryNumber));
   };
 
   const addCartridge = (cartridge: Cartridge) => {
     setCartridges(prev => [...prev, cartridge]);
+    const printer = printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+    setRefillLog(prev => [...prev, {
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: cartridge.id,
+      cartridgeModel: cartridge.model,
+      consumableType: cartridge.consumableType ?? 'cartridge',
+      deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+      serviceType: 'system',
+      printerInventoryNumber: cartridge.printerInventoryNumber,
+      printerModel: printer?.model ?? '',
+      department: printer?.department ?? '',
+      action: 'Добавлен расходник',
+    }]);
   };
 
   const removeCartridge = (id: string) => {
+    const cartridge = cartridges.find(c => c.id === id);
+    if (cartridge) {
+      const printer = printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+      setRefillLog(prev => [
+        {
+          id: Math.random().toString(36).substr(2, 9),
+          date: new Date().toISOString(),
+          cartridgeId: cartridge.id,
+          cartridgeModel: cartridge.model,
+          consumableType: cartridge.consumableType ?? 'cartridge',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+          serviceType: 'writeoff',
+          printerInventoryNumber: cartridge.printerInventoryNumber,
+          printerModel: printer?.model ?? '',
+          department: printer?.department ?? '',
+          action: 'Картридж удален/списан',
+        },
+        ...prev,
+      ]);
+    }
     setCartridges(prev => prev.filter(c => c.id !== id));
   };
 
+  /**
+   * Следующий монотонный слот для принтера (не сбрасывается при удалении расходника).
+   * Обновляет consumableCartridgeSeq / consumableDrumSeq на записи принтера.
+   */
+  const allocateConsumableSlot = (invRaw: string, type: ConsumableType, ensurePrinter?: Printer): number => {
+    const inv = normalizeInventoryNumber(invRaw);
+    const seqKey = type === 'drum' ? 'consumableDrumSeq' : 'consumableCartridgeSeq';
+    let nextSlot = 0;
+    setPrinters(prev => {
+      let row = prev.find(p => p.inventoryNumber === inv);
+      if (!row && ensurePrinter && normalizeInventoryNumber(ensurePrinter.inventoryNumber) === inv) {
+        row = ensurePrinter;
+      }
+      const carts = cartridgesRef.current;
+      let maxFromCarts = 0;
+      for (const c of carts) {
+        if (normalizeInventoryNumber(c.printerInventoryNumber) !== inv) continue;
+        if ((c.consumableType ?? 'cartridge') !== type) continue;
+        const sl = c.consumableSlot;
+        if (sl != null && Number.isFinite(sl) && sl > maxFromCarts) maxFromCarts = sl;
+      }
+      const seq = row ? (row[seqKey] ?? 0) : 0;
+      nextSlot = Math.max(seq, maxFromCarts) + 1;
+      if (!row) return prev;
+      const inPrev = prev.some(p => p.inventoryNumber === inv);
+      if (!inPrev) {
+        return [...prev, { ...row, [seqKey]: nextSlot }];
+      }
+      return prev.map(p => (p.inventoryNumber === inv ? { ...p, [seqKey]: nextSlot } : p));
+    });
+    return nextSlot;
+  };
+
   /** Generate a short unique ID for consumables: C-XXXXXX for cartridge, D-XXXXXX for drum */
-  const generateConsumableId = (type: ConsumableType = 'cartridge') => {
+  const generateConsumableId = (
+    type: ConsumableType = 'cartridge',
+    printerInventoryNumber?: string,
+    /** Монотонный слот (см. allocateConsumableSlot), не индекс «текущего количества» */
+    consumableSlot?: number,
+  ) => {
     const prefix = type === 'drum' ? 'D' : 'C';
-    return generateShortId(prefix);
+    if (printerInventoryNumber && Number.isFinite(consumableSlot)) {
+      return generateDeterministicId(prefix, `${normalizeInventoryNumber(printerInventoryNumber)}:${consumableSlot}`);
+    }
+    return generateRandomId(prefix);
   };
 
   /** Generate a short unique ID for new stock cartridges */
-  const generateNewCartridgeId = () => generateShortId('N');
+  const generateNewCartridgeId = (seed?: string) => (
+    seed ? generateDeterministicId('N', seed) : generateRandomId('N')
+  );
 
   /** Generate a short unique ID for printers */
-  const generatePrinterId = () => generateShortId('P');
+  const generatePrinterId = (inventoryNumber?: string) => (
+    inventoryNumber ? generateDeterministicId('P', normalizeInventoryNumber(inventoryNumber)) : generateRandomId('P')
+  );
 
   /** @deprecated use generateConsumableId */
   const generateCartridgeId = () => generateConsumableId('cartridge');
 
+  /**
+   * @param employee — кто совершил шаг (в историю), не обязательно «кто сдал» на склад
+   * @param submitterName — если задано непустое, записать в lastSubmittedBy («Кто сдал» в складе); иначе поле не меняем
+   */
   const updateCartridgeStatus = (
     id: string,
     status: CartridgeStatus,
     comment?: string,
     employee?: string,
+    submitterName?: string,
   ) => {
     setCartridges(prev =>
       prev.map(c => {
@@ -263,13 +630,14 @@ export const useStore = () => {
           employee,
         };
         const refillCount =
-          status === 'waiting' ? (c.refillCount ?? 0) + 1 : c.refillCount ?? 0;
+          status === 'received_from_refill' ? (c.refillCount ?? 0) + 1 : c.refillCount ?? 0;
+        const trimmedSubmitter = submitterName?.trim();
         const updated: Cartridge = {
           ...c,
           status,
           history: [...c.history, historyEntry],
           refillCount,
-          lastSubmittedBy: employee ?? c.lastSubmittedBy,
+          lastSubmittedBy: trimmedSubmitter ? trimmedSubmitter : c.lastSubmittedBy,
         };
         return updated;
       }),
@@ -284,19 +652,238 @@ export const useStore = () => {
     setRepairs(prev => prev.map(r => (r.id === id ? { ...r, ...updates } : r)));
   };
 
-  const replaceCartridge = (oldId: string, newCartridge: Cartridge) => {
+  const rndId = () => Math.random().toString(36).substr(2, 9);
+
+  /** Одним шагом: принять с заправки (если ещё at_refill) и выдать пользователю — без двойного batching setState. */
+  const finishIssueCartridgeFromBatch = (cartridgeId: string, batchId: string, employeeRaw?: string) => {
+    const employee = employeeRaw?.trim() || undefined;
+    const cartridge = cartridgesRef.current.find(c => c.id === cartridgeId);
+    if (!cartridge) return;
+    if (!['at_refill', 'received_from_refill', 'ready'].includes(cartridge.status)) return;
+
+    const printer = printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+    const hadAtRefill = cartridge.status === 'at_refill';
+
+    setCartridges(prev =>
+      prev.map(c => {
+        if (c.id !== cartridgeId) return c;
+        const hist = [...c.history];
+        let refillCount = c.refillCount ?? 0;
+        if (c.status === 'at_refill') {
+          refillCount += 1;
+          hist.push({
+            id: rndId(),
+            date: new Date().toISOString(),
+            action: STATUS_LABELS.received_from_refill,
+            comment: `Получен с заправки. Партия ${batchId}`,
+          });
+        } else if (c.status !== 'received_from_refill' && c.status !== 'ready') {
+          return c;
+        }
+        hist.push({
+          id: rndId(),
+          date: new Date().toISOString(),
+          action: STATUS_LABELS.on_hand,
+          comment: 'Выдан пользователю',
+          employee,
+        });
+        const trimmed = employee?.trim();
+        return {
+          ...c,
+          status: 'on_hand',
+          refillCount,
+          history: hist,
+          lastSubmittedBy: trimmed ? trimmed : c.lastSubmittedBy,
+        };
+      }),
+    );
+
+    const logs: RefillLogEntry[] = [];
+    if (hadAtRefill) {
+      logs.push({
+        id: rndId(),
+        date: new Date().toISOString(),
+        cartridgeId: cartridge.id,
+        cartridgeModel: cartridge.model,
+        consumableType: cartridge.consumableType ?? 'cartridge',
+        deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+        serviceType: 'receive',
+        printerInventoryNumber: cartridge.printerInventoryNumber,
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        action: `Получен с заправки. Партия ${batchId}`,
+      });
+    }
+    logs.push({
+      id: rndId(),
+      date: new Date().toISOString(),
+      cartridgeId: cartridge.id,
+      cartridgeModel: cartridge.model,
+      consumableType: cartridge.consumableType ?? 'cartridge',
+      deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+      serviceType: 'issue',
+      printerInventoryNumber: cartridge.printerInventoryNumber,
+      printerModel: printer?.model ?? '',
+      department: printer?.department ?? '',
+      employee,
+      action: 'Выдан пользователю',
+    });
+    setRefillLog(prev => [...logs, ...prev]);
+
+    if (employee) {
+      const exists = employees.find(
+        e => e.name === employee && e.printerInventoryNumber === cartridge.printerInventoryNumber,
+      );
+      if (!exists) {
+        setEmployees(prevE => [
+          ...prevE,
+          {
+            id: rndId(),
+            name: employee,
+            printerInventoryNumber: cartridge.printerInventoryNumber,
+            cartridgeId: cartridge.id,
+            addedDate: new Date().toISOString(),
+          },
+        ]);
+      }
+    }
+  };
+
+  /** Устройство с партии + связанные расходники: принять с заправки при необходимости и выдать одной кнопкой. */
+  const finishIssuePrinterBundleFromBatch = (
+    printerInventoryNumber: string,
+    repairId: string | undefined,
+    batchId: string,
+    employeeRaw?: string,
+  ) => {
+    const employee = employeeRaw?.trim() || undefined;
+    if (!repairId) return;
+    const repair = repairs.find(r => r.id === repairId);
+    const printer = printers.find(p => p.inventoryNumber === printerInventoryNumber);
+    if (!repair || !printer) return;
+    if (repair.locationStatus === 'issued') return;
+
+    const repairWasAtRefill = repair.locationStatus === 'at_refill';
+
+    const linkedIds = cartridgesRef.current
+      .filter(c => c.linkedRepairId === repair.id)
+      .map(c => c.id);
+
+    setRepairs(prev =>
+      prev.map(r => {
+        if (r.id !== repair.id) return r;
+        const next: RepairEntry = {
+          ...r,
+          locationStatus: 'issued',
+        };
+        if (repairWasAtRefill) {
+          next.status = 'repaired';
+          next.completionDate = new Date().toISOString();
+          next.repairDescription = r.repairDescription ?? 'Принят с заправки';
+        }
+        return next;
+      }),
+    );
+
+    setCartridges(prev =>
+      prev.map(c => {
+        if (!linkedIds.includes(c.id)) return c;
+        if (c.status === 'disposed') return c;
+        const hist = [...c.history];
+        let refillCount = c.refillCount ?? 0;
+        if (c.status === 'at_refill') {
+          refillCount += 1;
+          hist.push({
+            id: rndId(),
+            date: new Date().toISOString(),
+            action: STATUS_LABELS.received_from_refill,
+            comment: `Получен с заправки вместе с принтером. Партия ${batchId}`,
+          });
+        }
+        if (['at_refill', 'received_from_refill', 'ready'].includes(c.status)) {
+          hist.push({
+            id: rndId(),
+            date: new Date().toISOString(),
+            action: STATUS_LABELS.on_hand,
+            comment: 'Выдан вместе с принтером',
+            employee,
+          });
+          const trimmed = employee?.trim();
+          return {
+            ...c,
+            status: 'on_hand',
+            refillCount,
+            history: hist,
+            lastSubmittedBy: trimmed ? trimmed : c.lastSubmittedBy,
+          };
+        }
+        return c;
+      }),
+    );
+
+    if (repairWasAtRefill) {
+      setPrinters(prev =>
+        prev.map(p =>
+          p.inventoryNumber === printer.inventoryNumber
+            ? { ...p, refillCount: (p.refillCount ?? 0) + 1 }
+            : p,
+        ),
+      );
+    }
+
+    const logs: RefillLogEntry[] = [];
+    if (repairWasAtRefill) {
+      logs.push({
+        id: rndId(),
+        date: new Date().toISOString(),
+        cartridgeId: printer.programId ?? printer.inventoryNumber,
+        cartridgeModel: printer.model,
+        consumableType: 'device',
+        deviceType: printer.printerType ?? 'Устройство',
+        serviceType: 'receive',
+        printerInventoryNumber,
+        printerModel: printer.model,
+        department: printer.department ?? '',
+        action: `Принят с заправки (устройство). Партия ${batchId}`,
+      });
+    }
+    logs.push({
+      id: rndId(),
+      date: new Date().toISOString(),
+      cartridgeId: printer.programId ?? printer.inventoryNumber,
+      cartridgeModel: printer.model,
+      consumableType: 'device',
+      deviceType: printer.printerType ?? 'Устройство',
+      serviceType: 'issue',
+      printerInventoryNumber,
+      printerModel: printer.model,
+      department: printer.department ?? '',
+      employee,
+      action: 'Выдан пользователю (устройство, сканер)',
+    });
+    setRefillLog(prev => [...logs, ...prev]);
+  };
+
+  const replaceCartridge = (
+    oldId: string,
+    newCartridge: Cartridge,
+    disposeNote?: string,
+  ) => {
     setCartridges(prev => {
       const updated = prev.map(c => {
         if (c.id !== oldId) return c;
+        const trimmed = disposeNote?.trim();
         const historyEntry: HistoryEntry = {
           id: Math.random().toString(36).substr(2, 9),
           date: new Date().toISOString(),
-          action: `Заменён. Новый: ${newCartridge.id}`,
+          action: trimmed
+            ? `${trimmed} (новый ID: ${newCartridge.id})`
+            : `Заменён. Новый: ${newCartridge.id}`,
         };
         return {
           ...c,
           isReplaced: true,
-          status: 'replaced' as CartridgeStatus,
+          status: 'disposed' as CartridgeStatus,
           replacedById: newCartridge.id,
           history: [...c.history, historyEntry],
         };
@@ -307,6 +894,27 @@ export const useStore = () => {
 
   const addRepair = (repair: RepairEntry) => {
     setRepairs(prev => [...prev, repair]);
+    const printer = printers.find(p => p.inventoryNumber === repair.printerInventoryNumber);
+    if (printer) {
+      setPrinters(prev => prev.map(p => p.inventoryNumber === printer.inventoryNumber ? {
+        ...p,
+        repairCount: (p.repairCount ?? 0) + 1,
+      } : p));
+    }
+    setRefillLog(prev => [...prev, {
+      id: Math.random().toString(36).substr(2, 9),
+      date: repair.date,
+      cartridgeId: printer?.programId ?? repair.printerInventoryNumber,
+      cartridgeModel: printer?.model ?? '',
+      consumableType: 'device',
+      deviceType: printer?.printerType ?? 'Устройство',
+      serviceType: 'repair',
+      printerInventoryNumber: repair.printerInventoryNumber,
+      printerModel: printer?.model ?? '',
+      department: printer?.department ?? '',
+      employee: repair.technician,
+      action: `Принят в ремонт: ${repair.reason}`,
+    }]);
   };
 
   const addEmployee = (record: EmployeeRecord) => {
@@ -319,6 +927,62 @@ export const useStore = () => {
 
   const addRefillLog = (entry: RefillLogEntry) => {
     setRefillLog(prev => [...prev, entry]);
+  };
+
+  const removeLastWaitingAcceptRefillLogEntry = (cartridgeId: string) => {
+    setRefillLog(prev =>
+      stripLastMatchingRefillLog(prev, e => e.cartridgeId === cartridgeId && isRefillLogWaitingAcceptEntry(e)),
+    );
+  };
+
+  /** Отмена позиции «ожидает отправки»: убрать приём из журнала и вернуть расходник на руки. */
+  const cancelWaitingCartridgeIntake = (cartridgeId: string) => {
+    removeLastWaitingAcceptRefillLogEntry(cartridgeId);
+    updateCartridgeStatus(cartridgeId, 'on_hand', 'Отмена ожидания отправки');
+  };
+
+  /** Устройство в ожидании отправки в ремонт: удалить заявку, снять связанные расходники, убрать приём из журнала. */
+  const cancelWaitingRepairIntake = (repairId: string) => {
+    const repair = repairs.find(r => r.id === repairId);
+    const printer = repair ? printers.find(p => p.inventoryNumber === repair.printerInventoryNumber) : undefined;
+    const linkedWaiting = cartridges.filter(c => c.linkedRepairId === repairId && c.status === 'waiting');
+
+    setRefillLog(prev => {
+      let next = prev;
+      if (repair) {
+        const deviceKey = printer?.programId ?? repair.printerInventoryNumber;
+        next = stripLastMatchingRefillLog(
+          next,
+          e =>
+            e.consumableType === 'device' &&
+            isRefillLogWaitingAcceptEntry(e) &&
+            (e.cartridgeId === deviceKey || e.cartridgeId === repair.printerInventoryNumber),
+        );
+      }
+      for (const c of linkedWaiting) {
+        next = stripLastMatchingRefillLog(
+          next,
+          e => e.cartridgeId === c.id && isRefillLogWaitingAcceptEntry(e),
+        );
+      }
+      return next;
+    });
+
+    linkedWaiting.forEach(c => {
+      updateCartridge(c.id, { linkedRepairId: undefined });
+      updateCartridgeStatus(c.id, 'on_hand', 'Отмена ожидания отправки (устройство)');
+    });
+
+    setRepairs(prev => prev.filter(r => r.id !== repairId));
+    if (printer) {
+      setPrinters(prev =>
+        prev.map(p =>
+          p.inventoryNumber === printer.inventoryNumber
+            ? { ...p, repairCount: Math.max(0, (p.repairCount ?? 0) - 1) }
+            : p,
+        ),
+      );
+    }
   };
 
   const getEmployeesForPrinter = (invNum: string) =>
@@ -343,6 +1007,37 @@ export const useStore = () => {
     setPrinters(prev => prev.map(p => (p.inventoryNumber === inventoryNumber ? { ...p, ...updates } : p)));
   };
 
+  /** Сразу записать пустую базу на диск / в localStorage (обход 1.5s debounce перед reload). */
+  const wipeAllPersistedData = async () => {
+    const empty: DatabaseData = {
+      version: 1,
+      savedAt: new Date().toISOString(),
+      printers: [],
+      cartridges: [],
+      repairs: [],
+      batches: [],
+      settings: migrateSettings({}),
+      employees: [],
+      refillLog: [],
+      newCartridges: [],
+    };
+    if (shouldUseFileDatabase() && window.electronAPI?.saveDatabase) {
+      const res = await window.electronAPI.saveDatabase(empty);
+      if (!res.success) {
+        throw new Error(res.error ?? 'Не удалось записать пустую базу');
+      }
+      return;
+    }
+    localStorage.setItem('printers', '[]');
+    localStorage.setItem('cartridges', '[]');
+    localStorage.setItem('repairs', '[]');
+    localStorage.setItem('batches', '[]');
+    localStorage.setItem('app_settings', JSON.stringify(migrateSettings({})));
+    localStorage.setItem('employees', '[]');
+    localStorage.setItem('refill_log', '[]');
+    localStorage.setItem('new_cartridges', '[]');
+  };
+
   return {
     printers, setPrinters,
     cartridges, setCartridges,
@@ -356,6 +1051,7 @@ export const useStore = () => {
     updatePrinter,
     addCartridge,
     removeCartridge,
+    allocateConsumableSlot,
     generateConsumableId,
     generateNewCartridgeId,
     generatePrinterId,
@@ -364,16 +1060,22 @@ export const useStore = () => {
     updateCartridge,
     updateRepair,
     replaceCartridge,
+    finishIssueCartridgeFromBatch,
+    finishIssuePrinterBundleFromBatch,
     addRepair,
     addEmployee,
     removeEmployee,
     addRefillLog,
+    cancelWaitingCartridgeIntake,
+    cancelWaitingRepairIntake,
     getEmployeesForPrinter,
     getEmployeesForCartridge,
     newCartridges, setNewCartridges,
     addNewCartridge,
     removeNewCartridge,
     updateNewCartridge,
+    dbProcessing,
+    wipeAllPersistedData,
   };
 };
 

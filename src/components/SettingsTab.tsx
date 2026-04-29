@@ -1,12 +1,13 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Settings, Printer as PrinterIcon, Scan, Sliders, RefreshCw,
   Barcode as BarcodeIcon, CheckCircle2, AlertCircle, Volume2, VolumeX,
   Save, RotateCcw, Info, Wifi, PenLine,
   Trash2, MemoryStick,
 } from 'lucide-react';
-import { AppSettings, DEFAULT_SETTINGS } from '../types';
+import { AppSettings, DEFAULT_SETTINGS, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
 import { buildMemoryResetTSPL } from '../utils/tspl';
 import LabelEditorTab from './LabelEditorTab';
@@ -52,8 +53,8 @@ function buildBorderTestLabel(settings: AppSettings): string {
   ].join('\r\n');
 }
 
-const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [subTab, setSubTab] = useState('printer');
+const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ store, initialSubTab = 'printer' }) => {
+  const [subTab, setSubTab] = useState(initialSubTab);
   const [cfg, setCfg] = useState<AppSettings>({ ...store.settings });
   const [saved, setSaved] = useState(false);
 
@@ -71,6 +72,10 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const scanInputRef = useRef<HTMLInputElement>(null);
 
   const isElectron = !!window.electronAPI;
+
+  useEffect(() => {
+    setSubTab(initialSubTab);
+  }, [initialSubTab]);
 
   const refreshPrinters = async () => {
     if (!isElectron) return;
@@ -118,6 +123,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       showPreviewBeforePrint: cfg.showPreviewBeforePrint,
       soundNotification: cfg.soundNotification,
       showTechLogs: cfg.showTechLogs,
+      enableEventEditing: cfg.enableEventEditing,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -164,6 +170,90 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!window.electronAPI?.getDataFolder || !window.electronAPI?.openFolder) return;
     const folder = await window.electronAPI.getDataFolder();
     await window.electronAPI.openFolder(folder);
+  };
+
+  const handleExportFullDatabase = () => {
+    const printersSheet = store.printers.map(p => ({
+      'ID': p.programId ?? '',
+      'Инв. №': p.inventoryNumber,
+      'Модель': p.model,
+      'Тип': p.printerType,
+      'Подразделение': p.department,
+      'Мат. ответственный': p.boss,
+      'Дата ввода': p.commissionDate,
+      'Стоимость': p.balanceCost,
+      'Модели расходников': p.cartridgeModels.join(', '),
+    }));
+    const cartridgesSheet = store.cartridges.map(c => {
+      const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
+      return {
+        'ID': c.id,
+        'Штрихкод': c.barcode,
+        'Модель': c.model,
+        'Тип': c.consumableType === 'drum' ? 'Драм' : 'Картридж',
+        'Цвет': c.color ?? '',
+        'Статус': STATUS_LABELS[c.status] ?? c.status,
+        'Заправок': c.refillCount,
+        'Принтер (инв.)': c.printerInventoryNumber,
+        'Принтер (модель)': printer?.model ?? '',
+        'Подразделение': printer?.department ?? '',
+        'Кто сдал': c.lastSubmittedBy ?? '',
+        'Дата регистрации': new Date(c.registrationDate).toLocaleDateString('ru-RU'),
+      };
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(printersSheet), 'Принтеры');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cartridgesSheet), 'Расходники');
+    XLSX.writeFile(wb, `database_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const handleExportJsonBackup = async () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      printers: store.printers,
+      cartridges: store.cartridges,
+      repairs: store.repairs,
+      batches: store.batches,
+      refillLog: store.refillLog,
+      warehouses: {
+        waiting: store.cartridges.filter(c => c.status === 'waiting'),
+        atRefill: store.cartridges.filter(c => c.status === 'at_refill'),
+        ready: store.cartridges.filter(c => c.status === 'received_from_refill' || c.status === 'ready'),
+      },
+    };
+    if (window.electronAPI?.exportJsonBackup) {
+      const res = await window.electronAPI.exportJsonBackup(payload);
+      if (!res.success) alert(`Ошибка экспорта JSON: ${res.error ?? 'неизвестно'}`);
+      return;
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `database_export_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearSavedUiHints = () => {
+    try {
+      const keysToRemove = [
+        'inventory_sender_list',
+      ];
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+
+      const dynamicKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (key.startsWith('search_')) {
+          dynamicKeys.push(key);
+        }
+      }
+      dynamicKeys.forEach(key => localStorage.removeItem(key));
+    } catch {
+      // ignore storage errors
+    }
   };
 
   return (
@@ -474,6 +564,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               { key: 'showPreviewBeforePrint', label: 'Показывать предпросмотр перед печатью', hint: 'Открывает окно подтверждения с превью' },
               { key: 'soundNotification', label: 'Звук после успешного сканирования', hint: 'Короткий сигнал при обработке штрих-кода' },
               { key: 'showTechLogs', label: 'Технические записи в журнале', hint: 'Показывать все системные события в журнале заправок' },
+              { key: 'enableEventEditing', label: 'Разрешить редактирование/отмену событий', hint: 'Удаление партий, отмена статусов и других операций' },
             ].map(({ key, label, hint }) => {
               const val = (cfg as unknown as Record<string, boolean>)[key];
               return (
@@ -527,15 +618,27 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 Открыть папку Data
               </button>
               <button
-                onClick={() => {
-                  if (confirm('Очистить ВСЕ данные? Это необратимо!')) {
-                    store.setPrinters([]);
-                    store.setCartridges([]);
-                    store.setRepairs([]);
-                    store.setBatches([]);
-                    store.setEmployees([]);
-                    store.setRefillLog([]);
-                    store.setNewCartridges([]);
+                onClick={handleExportFullDatabase}
+                className="px-4 py-2 bg-green-50 text-green-700 border border-green-200 rounded-lg text-sm hover:bg-green-100 font-semibold"
+              >
+                Выгрузить всю базу в Excel
+              </button>
+              <button
+                onClick={handleExportJsonBackup}
+                className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm hover:bg-indigo-100 font-semibold"
+              >
+                Экспорт JSON (backup)
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!confirm('Очистить ВСЕ данные? Это необратимо!')) return;
+                  try {
+                    await store.wipeAllPersistedData();
+                    clearSavedUiHints();
+                    window.location.reload();
+                  } catch (e) {
+                    alert(e instanceof Error ? e.message : 'Не удалось очистить данные');
                   }
                 }}
                 className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg text-sm hover:bg-red-100 font-semibold"

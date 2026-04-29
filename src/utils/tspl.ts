@@ -64,6 +64,9 @@ function dots(value: number | undefined, fallback = 0): number {
   return Math.max(0, Math.round(value ?? fallback));
 }
 
+/** Метка «прошивка есть» на этикетке (буква «П» — в шрифтах TSC точка/● часто уходят в «?») */
+export const LABEL_FIRMWARE_MARK = 'П';
+
 export interface LabelData {
   id: string;
   inv: string;
@@ -83,6 +86,19 @@ export interface LabelData {
   location?: string;
   description?: string;
   vendor?: string;
+  /** true только если у связанного принтера отмечена прошивка — тогда {fw}/{firmware} дают «П», иначе пусто */
+  firmwareFlashed?: boolean;
+}
+
+/**
+ * Legacy compatibility: old custom templates could contain hardcoded TEXT "...","П".
+ * Convert only those TEXT payloads to {fw}, so firmware marker is data-driven.
+ */
+function normalizeLegacyFirmwareToken(tspl: string): string {
+  return tspl.replace(
+    /^(TEXT\s+[^,\r\n]+(?:,[^,\r\n]+){5},)"П"\s*$/gim,
+    '$1"{fw}"',
+  );
 }
 
 /** Replace template variables with actual data */
@@ -111,7 +127,9 @@ export function resolveContent(
     .replace(/\{location\}/g, data.location ?? '')
     .replace(/\{description\}/g, data.description ?? '')
     .replace(/\{vendor\}/g, data.vendor ?? '')
-    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
+    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
+    .replace(/\{fw\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
+    .replace(/\{firmware\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '');
 }
 
 /** Build a complete TSPL print job from template + settings + data */
@@ -122,7 +140,8 @@ export function buildTSPLLabel(
   options: { ignoreCustomTspl?: boolean } = {},
 ): string {
   if (settings.labelTsplTemplate && !options.ignoreCustomTspl) {
-    return resolveContent(settings.labelTsplTemplate, data).trimEnd();
+    const normalizedTemplate = normalizeLegacyFirmwareToken(settings.labelTsplTemplate);
+    return resolveContent(normalizedTemplate, data).trimEnd();
   }
 
   const effectiveSettings: AppSettings = {

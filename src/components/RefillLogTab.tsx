@@ -6,9 +6,39 @@ import {
 import * as XLSX from 'xlsx';
 import { StoreType } from '../store';
 import { RefillLogEntry } from '../types';
+import { useStickyState } from '../utils/useStickyState';
+
+function normalizedTypeLabel(entry: RefillLogEntry): string {
+  if (entry.consumableType === 'device') return 'Устройство';
+  if (entry.consumableType === 'drum') return 'Драм-картридж';
+  return 'Картридж';
+}
+
+function typeBadgeClass(entry: RefillLogEntry): string {
+  if (entry.consumableType === 'device') return 'bg-violet-100 text-violet-700';
+  if (entry.consumableType === 'drum') return 'bg-amber-100 text-amber-700';
+  return 'bg-blue-100 text-blue-700';
+}
+
+function serviceBadgeClass(type?: RefillLogEntry['serviceType']): string {
+  switch (type) {
+    case 'accept': return 'bg-cyan-100 text-cyan-700';
+    case 'shipment': return 'bg-orange-100 text-orange-700';
+    case 'receive': return 'bg-emerald-100 text-emerald-700';
+    case 'issue': return 'bg-green-100 text-green-700';
+    case 'repair': return 'bg-fuchsia-100 text-fuchsia-700';
+    case 'writeoff': return 'bg-rose-100 text-rose-700';
+    case 'delete': return 'bg-red-100 text-red-700';
+    case 'cancel': return 'bg-slate-200 text-slate-700';
+    default: return 'bg-indigo-100 text-indigo-700';
+  }
+}
 
 const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useStickyState('search_refill_log', '');
+  const [logView, setLogView] = useState<'business' | 'all' | 'writeoff' | 'repairs'>('business');
+  const [showTopModal, setShowTopModal] = useState(false);
+  const [topSearch, setTopSearch] = useState('');
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -17,7 +47,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
     window.addEventListener('app-scanner-input', onScan as EventListener);
     return () => window.removeEventListener('app-scanner-input', onScan as EventListener);
   }, []);
-  const [filterType, setFilterType] = useState<'all' | 'cartridge' | 'drum'>('all');
+  const [filterType, setFilterType] = useState<'all' | 'cartridge' | 'drum' | 'device'>('all');
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [filterDepartment, setFilterDepartment] = useState('');
@@ -27,49 +57,74 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
     action.includes('Отправлен на заправку') ||
     action.includes('Получен с заправки') ||
     action.includes('Принят с заправки') ||
-    action.includes('Выдан пользователю');
+    action.includes('Выдан пользователю') ||
+    action.includes('Заменен на новый') ||
+    action.includes('Принят в ремонт') ||
+    action.includes('Ремонт:');
 
   // In normal mode show only business refill/handout events.
   // Technical cartridge history is mixed in only when enabled in settings.
   const allEntries = useMemo((): RefillLogEntry[] => {
-    const entries: RefillLogEntry[] = store.refillLog.filter(e =>
-      store.settings.showTechLogs || isBusinessAction(e.action),
-    );
+    const entries: RefillLogEntry[] = store.refillLog.filter(e => {
+      if (!store.settings.showTechLogs) return isBusinessAction(e.action);
+      if (logView === 'all') return true;
+      if (logView === 'writeoff') return e.serviceType === 'writeoff' || /\b(списан|списание|удален|удалено)\b/i.test(e.action);
+      if (logView === 'repairs') return e.serviceType === 'repair';
+      return isBusinessAction(e.action);
+    });
 
-    if (!store.settings.showTechLogs) {
-      return entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    if (store.settings.showTechLogs) {
+      store.cartridges.forEach(c => {
+        const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
+        c.history.forEach(h => {
+          if (
+            h.action.includes('Ожидает отправки') ||
+            h.action.includes('На заправке') ||
+            h.action.includes('заправк') ||
+            h.action.includes('Получен')
+          ) {
+            const alreadyExists = entries.some(e => e.id === `hist_${h.id}`);
+            if (!alreadyExists) {
+              entries.push({
+                id: `hist_${h.id}`,
+                date: h.date,
+                cartridgeId: c.id,
+                cartridgeModel: c.model,
+                consumableType: c.consumableType ?? 'cartridge',
+                deviceType: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
+                serviceType: 'refill',
+                printerInventoryNumber: c.printerInventoryNumber,
+                printerModel: printer?.model ?? '',
+                department: printer?.department ?? '',
+                employee: h.employee,
+                action: h.action,
+              });
+            }
+          }
+        });
+      });
     }
 
-    store.cartridges.forEach(c => {
-      const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
-      c.history.forEach(h => {
-        if (
-          h.action.includes('Ожидает отправки') ||
-          h.action.includes('На заправке') ||
-          h.action.includes('заправк') ||
-          h.action.includes('Получен')
-        ) {
-          const alreadyExists = entries.some(e => e.id === `hist_${h.id}`);
-          if (!alreadyExists) {
-            entries.push({
-              id: `hist_${h.id}`,
-              date: h.date,
-              cartridgeId: c.id,
-              cartridgeModel: c.model,
-              consumableType: c.consumableType ?? 'cartridge',
-              printerInventoryNumber: c.printerInventoryNumber,
-              printerModel: printer?.model ?? '',
-              department: printer?.department ?? '',
-              employee: h.employee,
-              action: h.action,
-            });
-          }
-        }
+    store.repairs.forEach(r => {
+      const printer = store.printers.find(p => p.inventoryNumber === r.printerInventoryNumber);
+      entries.push({
+        id: `repair_${r.id}`,
+        date: r.date,
+        cartridgeId: printer?.programId ?? r.printerInventoryNumber,
+        cartridgeModel: printer?.model ?? 'Устройство',
+        consumableType: 'device',
+        deviceType: printer?.printerType ?? 'Устройство',
+        serviceType: 'repair',
+        printerInventoryNumber: r.printerInventoryNumber,
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        employee: r.technician,
+        action: `Ремонт: ${r.reason}${r.status === 'repaired' ? ' (завершён)' : ''}`,
       });
     });
 
     return entries.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-  }, [store.refillLog, store.cartridges, store.printers, store.settings.showTechLogs]);
+  }, [store.refillLog, store.cartridges, store.printers, store.settings.showTechLogs, store.repairs, logView]);
 
   // Unique departments list
   const departments = useMemo(() => {
@@ -95,7 +150,9 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
         (e.employee ?? '').toLowerCase().includes(q) ||
         (e.department ?? '').toLowerCase().includes(q);
 
-      const matchType = filterType === 'all' || e.consumableType === filterType;
+      const matchType = e.serviceType === 'repair'
+        ? (filterType === 'all' || filterType === 'device')
+        : (filterType === 'all' || e.consumableType === filterType);
 
       const entryDate = e.date.slice(0, 10);
       const matchFrom = !dateFrom || entryDate >= dateFrom;
@@ -110,7 +167,9 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
   // Stats per printer
   const printerStats = useMemo(() => {
     const map = new Map<string, { inv: string; model: string; department: string; count: number }>();
-    allEntries.forEach(e => {
+    allEntries
+      .filter(e => e.serviceType === 'refill' && e.action.includes('Отправлен на заправку'))
+      .forEach(e => {
       const key = e.printerInventoryNumber;
       const existing = map.get(key);
       if (existing) {
@@ -132,12 +191,27 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
     [allEntries],
   );
 
+  const serviceTypeLabel = (type?: RefillLogEntry['serviceType']) => {
+    switch (type) {
+      case 'repair': return 'Ремонт';
+      case 'writeoff': return 'Списание';
+      case 'accept': return 'Прием';
+      case 'shipment': return 'Отправка';
+      case 'receive': return 'Приемка';
+      case 'issue': return 'Выдача';
+      case 'delete': return 'Удаление';
+      case 'cancel': return 'Отмена';
+      default: return 'Заправка';
+    }
+  };
+
   const exportToExcel = async () => {
     const data = filtered.map(e => ({
       'Дата': new Date(e.date).toLocaleString('ru-RU'),
       'ID расходника': e.cartridgeId,
       'Модель расходника': e.cartridgeModel,
-      'Тип': e.consumableType === 'drum' ? 'Драм' : 'Картридж',
+      'Тип': normalizedTypeLabel(e),
+      'Вид услуги': serviceTypeLabel(e.serviceType),
       'Инв. № принтера': e.printerInventoryNumber,
       'Модель принтера': e.printerModel,
       'Подразделение': e.department ?? '',
@@ -173,7 +247,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   return (
-    <div className="space-y-5">
+    <div className="h-full min-h-0 flex flex-col gap-5 overflow-hidden">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800 flex items-center space-x-2">
           <ClipboardList size={22} className="text-blue-600" />
@@ -216,11 +290,11 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <span>Топ принтеров по заправкам</span>
           </h3>
           <div className="space-y-1.5">
-            {printerStats.slice(0, 10).map(s => {
+            {printerStats.slice(0, 3).map(s => {
               const maxCount = printerStats[0].count;
               return (
                 <div key={s.inv} className="flex items-center space-x-2 text-sm">
-                  <div className="w-28 shrink-0 font-mono font-bold text-gray-700 truncate">{s.inv}</div>
+                  <div className="w-44 shrink-0 font-mono font-bold text-gray-700">{s.inv}</div>
                   <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
                     <div
                       className="bg-blue-500 h-full rounded-full"
@@ -239,11 +313,32 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
               );
             })}
           </div>
+          <button onClick={() => setShowTopModal(true)} className="mt-3 text-xs font-semibold text-blue-600 hover:underline">
+            Развернуть рейтинг
+          </button>
         </div>
       )}
 
       {/* Filters */}
       <div className="flex flex-wrap gap-3 items-center">
+        {store.settings.showTechLogs && (
+          <div className="flex rounded-lg border overflow-hidden text-xs font-semibold">
+            {([
+              ['business', 'Основной журнал'],
+              ['all', 'Все'],
+              ['repairs', 'Ремонты'],
+              ['writeoff', 'Списания'],
+            ] as const).map(([id, label]) => (
+              <button
+                key={id}
+                onClick={() => setLogView(id)}
+                className={`px-3 py-2 ${logView === id ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'}`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="relative w-56">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
           <input
@@ -271,7 +366,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
 
         <div className="flex rounded-lg border overflow-hidden text-xs font-semibold">
-          {(['all', 'cartridge', 'drum'] as const).map(t => (
+          {(['all', 'cartridge', 'drum', 'device'] as const).map(t => (
             <button
               key={t}
               onClick={() => setFilterType(t)}
@@ -279,7 +374,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 filterType === t ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
               }`}
             >
-              {t === 'all' ? 'Все' : t === 'cartridge' ? 'Картриджи' : 'Драм'}
+              {t === 'all' ? 'Все' : t === 'cartridge' ? 'Картриджи' : t === 'drum' ? 'Драм' : 'Устройства'}
             </button>
           ))}
         </div>
@@ -302,8 +397,8 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
       </div>
 
       {/* Log table */}
-      <div className="bg-white rounded-xl border overflow-hidden">
-        <div className="overflow-auto max-h-[500px]">
+      <div className="bg-white rounded-xl border overflow-hidden flex-1 min-h-0">
+        <div className="overflow-auto h-full">
           <table className="w-full text-xs text-left">
             <thead className="bg-gray-50 sticky top-0 z-10">
               <tr>
@@ -311,6 +406,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 <th className="p-2.5 border-b font-semibold">ID расходника</th>
                 <th className="p-2.5 border-b font-semibold">Модель</th>
                 <th className="p-2.5 border-b font-semibold">Тип</th>
+                <th className="p-2.5 border-b font-semibold">Вид услуги</th>
                 <th className="p-2.5 border-b font-semibold">Принтер</th>
                 <th className="p-2.5 border-b font-semibold">Подразделение</th>
                 <th className="p-2.5 border-b font-semibold">Сотрудник</th>
@@ -320,7 +416,7 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <tbody className="divide-y">
               {filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="p-8 text-center text-gray-300 italic">Нет записей</td>
+                  <td colSpan={9} className="p-8 text-center text-gray-300 italic">Нет записей</td>
                 </tr>
               ) : (
                 filtered.map(e => (
@@ -331,8 +427,13 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <td className="p-2.5 font-mono font-bold text-gray-700">{e.cartridgeId}</td>
                     <td className="p-2.5">{e.cartridgeModel}</td>
                     <td className="p-2.5">
-                      <span className={`px-1.5 py-0.5 rounded font-bold ${e.consumableType === 'drum' ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'}`}>
-                        {e.consumableType === 'drum' ? 'Драм' : 'Картридж'}
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${typeBadgeClass(e)}`}>
+                        {normalizedTypeLabel(e)}
+                      </span>
+                    </td>
+                    <td className="p-2.5">
+                      <span className={`px-1.5 py-0.5 rounded font-bold ${serviceBadgeClass(e.serviceType)}`}>
+                        {serviceTypeLabel(e.serviceType)}
                       </span>
                     </td>
                     <td className="p-2.5">
@@ -356,6 +457,36 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
           </table>
         </div>
       </div>
+      {showTopModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50" onMouseDown={(e) => e.target === e.currentTarget && setShowTopModal(false)}>
+          <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[80vh] overflow-hidden">
+            <div className="p-4 border-b flex items-center justify-between">
+              <h3 className="font-bold">Рейтинг заправок</h3>
+              <button onClick={() => setShowTopModal(false)}>✕</button>
+            </div>
+            <div className="p-4">
+              <input
+                value={topSearch}
+                onChange={e => setTopSearch(e.target.value)}
+                placeholder="Поиск по инвентарному номеру..."
+                className="w-full mb-3 p-2 border rounded-lg text-sm"
+              />
+              <div className="max-h-[55vh] overflow-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr><th className="p-2 text-left">Инв.№</th><th className="p-2 text-left">Модель</th><th className="p-2 text-left">Заправок</th></tr>
+                  </thead>
+                  <tbody>
+                    {printerStats.filter(s => s.inv.toLowerCase().includes(topSearch.toLowerCase())).map(s => (
+                      <tr key={s.inv} className="border-t"><td className="p-2 font-mono">{s.inv}</td><td className="p-2">{s.model}</td><td className="p-2 font-bold">{s.count}</td></tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

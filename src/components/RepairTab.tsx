@@ -13,12 +13,15 @@ import {
 } from 'lucide-react';
 import { RepairEntry } from '../types';
 import { StoreType } from '../store';
+import { useStickyState } from '../utils/useStickyState';
 
 interface NewRepairForm {
   printerInventoryNumber: string;
   reason: string;
   technician: string;
   comment: string;
+  includeCartridges: boolean;
+  selectedCartridgeIds: string[];
 }
 
 const EMPTY_FORM: NewRepairForm = {
@@ -26,15 +29,19 @@ const EMPTY_FORM: NewRepairForm = {
   reason: '',
   technician: '',
   comment: '',
+  includeCartridges: false,
+  selectedCartridgeIds: [],
 };
 
 const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [showFinish, setShowFinish] = useState<RepairEntry | null>(null);
   const [repairDescription, setRepairDescription] = useState('');
+  const [firmwareOnComplete, setFirmwareOnComplete] = useState(false);
   const [newRepair, setNewRepair] = useState<NewRepairForm>(EMPTY_FORM);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [printerSearch, setPrinterSearch] = useState('');
+  const [editRepair, setEditRepair] = useState<RepairEntry | null>(null);
+  const [searchQuery, setSearchQuery] = useStickyState('search_repair_history', '');
+  const [printerSearch, setPrinterSearch] = useStickyState('search_repair_select', '');
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -75,16 +82,49 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       alert('Выберите принтер');
       return;
     }
+    const resolvedPrinter = store.printers.find(p =>
+      p.inventoryNumber === newRepair.printerInventoryNumber ||
+      (p.programId ?? '').toLowerCase() === newRepair.printerInventoryNumber.toLowerCase(),
+    );
+    if (!resolvedPrinter) {
+      alert('Принтер не найден по инвентарному номеру или ID');
+      return;
+    }
+    const exists = store.repairs.some(r =>
+      r.printerInventoryNumber === resolvedPrinter.inventoryNumber &&
+      (r.status === 'in_repair' || r.status === 'waiting'),
+    );
+    if (exists) {
+      alert('Этот принтер уже находится в активном ремонте');
+      return;
+    }
     const repair: RepairEntry = {
       id: Math.random().toString(36).substr(2, 9),
-      printerInventoryNumber: newRepair.printerInventoryNumber,
+      printerInventoryNumber: resolvedPrinter.inventoryNumber,
       date: new Date().toISOString(),
       reason: newRepair.reason,
       status: 'in_repair',
+      locationStatus: 'at_refill',
       technician: newRepair.technician || undefined,
       comment: newRepair.comment || undefined,
     };
     store.addRepair(repair);
+    if (newRepair.includeCartridges) {
+      store.cartridges
+        .filter(c => newRepair.selectedCartridgeIds.includes(c.id))
+        .forEach(c => {
+          if (c.status === 'on_hand') {
+            store.updateCartridgeStatus(
+              c.id,
+              'waiting',
+              'Принят на склад вместе с принтером',
+              newRepair.technician || undefined,
+              newRepair.technician || undefined,
+            );
+            store.updateCartridge(c.id, { linkedRepairId: repair.id });
+          }
+        });
+    }
     setNewRepair(EMPTY_FORM);
     setPrinterSearch('');
     setShowAdd(false);
@@ -93,13 +133,20 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const handleFinishRepair = (e: React.FormEvent) => {
     e.preventDefault();
     if (!showFinish) return;
+    const inv = showFinish.printerInventoryNumber;
+    const printerRow = store.printers.find(p => p.inventoryNumber === inv);
     store.updateRepair(showFinish.id, {
       status: 'repaired',
+      locationStatus: 'ready',
       completionDate: new Date().toISOString(),
       repairDescription: repairDescription || undefined,
     });
+    if (firmwareOnComplete && !printerRow?.firmwareFlashed) {
+      store.updatePrinter(inv, { firmwareFlashed: true });
+    }
     setShowFinish(null);
     setRepairDescription('');
+    setFirmwareOnComplete(false);
   };
 
   const statusTag = (status: RepairEntry['status']) => {
@@ -148,6 +195,9 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <div className="flex justify-between items-start mb-3">
                 <div>
                   <div className="font-bold text-lg">{repair.printerInventoryNumber}</div>
+                  <div className="text-xs font-mono text-gray-400">
+                    ID: {store.printers.find(p => p.inventoryNumber === repair.printerInventoryNumber)?.programId ?? '—'}
+                  </div>
                   <div className="text-xs text-gray-500 mt-0.5">
                     {getPrinterLabel(repair.printerInventoryNumber).split('—')[1]?.trim()}
                   </div>
@@ -161,6 +211,16 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <div className="mb-2">
                 <div className="text-xs text-gray-400 uppercase font-bold mb-0.5">Причина:</div>
                 <div className="text-gray-700 text-sm">{repair.reason}</div>
+              </div>
+              <div className="mb-2 text-xs text-gray-500">
+                Статус размещения:{' '}
+                <span className="font-semibold">
+                  {repair.locationStatus === 'ready'
+                    ? 'Готов к выдаче'
+                    : repair.locationStatus === 'at_refill'
+                      ? 'На заправке'
+                      : 'Ожидает отправки'}
+                </span>
               </div>
 
               {repair.technician && (
@@ -178,18 +238,32 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
               <div className="flex space-x-2">
                 <button
-                  onClick={() => { setShowFinish(repair); setRepairDescription(''); }}
+                  onClick={() => { setShowFinish(repair); setRepairDescription(''); setFirmwareOnComplete(false); }}
                   className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center justify-center space-x-2 text-sm font-bold"
                 >
                   <CheckCircle2 size={15} />
                   <span>Завершить</span>
                 </button>
                 <button
-                  onClick={() => store.updateRepair(repair.id, { status: repair.status === 'waiting' ? 'in_repair' : 'waiting' })}
+                  onClick={() => setEditRepair(repair)}
                   className="px-3 py-2 border rounded-lg hover:bg-gray-50 text-xs text-gray-500"
                 >
-                  {repair.status === 'waiting' ? 'Взять в работу' : 'Пауза'}
+                  Редактировать
                 </button>
+                {store.settings.enableEventEditing && (
+                  <button
+                    onClick={() => {
+                      store.setRepairs(prev => prev.filter(r => r.id !== repair.id));
+                      const printer = store.printers.find(p => p.inventoryNumber === repair.printerInventoryNumber);
+                      if (printer) {
+                        store.updatePrinter(printer.inventoryNumber, { repairCount: Math.max(0, (printer.repairCount ?? 0) - 1) });
+                      }
+                    }}
+                    className="px-3 py-2 border border-red-200 text-red-600 rounded-lg hover:bg-red-50 text-xs"
+                  >
+                    Удалить событие
+                  </button>
+                )}
               </div>
             </div>
           ))}
@@ -221,6 +295,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <th className="p-3 font-bold text-xs">Принтер</th>
                   <th className="p-3 font-bold text-xs">Проблема</th>
                   <th className="p-3 font-bold text-xs">Решение</th>
+                  {store.settings.enableEventEditing && <th className="p-3 font-bold text-xs">Действия</th>}
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -240,11 +315,40 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <td className="p-3 text-gray-500 max-w-[150px] truncate italic text-xs">
                       {repair.repairDescription ?? '—'}
                     </td>
+                    {store.settings.enableEventEditing && (
+                      <td className="p-3">
+                        <button
+                          onClick={() => {
+                            store.setRepairs(prev => prev.filter(r => r.id !== repair.id));
+                            const printer = store.printers.find(p => p.inventoryNumber === repair.printerInventoryNumber);
+                            if (printer) {
+                              store.updatePrinter(printer.inventoryNumber, { repairCount: Math.max(0, (printer.repairCount ?? 0) - 1) });
+                            }
+                            store.addRefillLog({
+                              id: Math.random().toString(36).substr(2, 9),
+                              date: new Date().toISOString(),
+                              cartridgeId: printer?.programId ?? repair.printerInventoryNumber,
+                              cartridgeModel: printer?.model ?? 'Устройство',
+                              consumableType: 'device',
+                              deviceType: printer?.printerType ?? 'Устройство',
+                              serviceType: 'cancel',
+                              printerInventoryNumber: repair.printerInventoryNumber,
+                              printerModel: printer?.model ?? '',
+                              department: printer?.department ?? '',
+                              action: `Удалено событие ремонта: ${repair.reason}`,
+                            });
+                          }}
+                          className="px-2 py-1 border border-red-200 text-red-600 rounded text-xs hover:bg-red-50"
+                        >
+                          Удалить
+                        </button>
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {filteredHistory.length === 0 && (
                   <tr>
-                    <td colSpan={4} className="p-8 text-center text-gray-400 italic">Нет записей</td>
+                    <td colSpan={store.settings.enableEventEditing ? 5 : 4} className="p-8 text-center text-gray-400 italic">Нет записей</td>
                   </tr>
                 )}
               </tbody>
@@ -264,14 +368,32 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <form onSubmit={handleAddRepair} className="space-y-4">
               {/* Searchable printer selection */}
               <div>
-                <label className="text-xs text-gray-500 block mb-1">Принтер (инв. номер) *</label>
+                <label className="text-xs text-gray-500 block mb-1">Принтер (инв. номер или ID) *</label>
                 <div className="relative mb-1">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
                   <input
                     type="text"
                     placeholder="Введите инв. №, ID или модель..."
                     value={printerSearch}
-                    onChange={e => setPrinterSearch(e.target.value)}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setPrinterSearch(val);
+                      const exact = store.printers.find(p =>
+                        p.inventoryNumber.toLowerCase() === val.toLowerCase() ||
+                        (p.programId ?? '').toLowerCase() === val.toLowerCase(),
+                      );
+                      if (exact) {
+                        setNewRepair({
+                          ...newRepair,
+                          printerInventoryNumber: exact.inventoryNumber,
+                          technician: newRepair.technician || exact.boss || '',
+                          selectedCartridgeIds: store.cartridges
+                            .filter(c => c.printerInventoryNumber === exact.inventoryNumber && !c.isReplaced)
+                            .map(c => c.id),
+                        });
+                        setPrinterSearch('');
+                      }
+                    }}
                     className="w-full pl-9 p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                   />
                 </div>
@@ -297,6 +419,9 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                               ...newRepair,
                               printerInventoryNumber: p.inventoryNumber,
                               technician: newRepair.technician || p.boss || '',
+                              selectedCartridgeIds: store.cartridges
+                                .filter(c => c.printerInventoryNumber === p.inventoryNumber && !c.isReplaced)
+                                .map(c => c.id),
                             });
                             setPrinterSearch('');
                           }}
@@ -340,6 +465,36 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   onChange={e => setNewRepair({ ...newRepair, comment: e.target.value })}
                 />
               </div>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={newRepair.includeCartridges}
+                  onChange={e => setNewRepair({ ...newRepair, includeCartridges: e.target.checked })}
+                />
+                <span>Добавить картриджи принтера в ожидание отправки</span>
+              </label>
+              {newRepair.includeCartridges && newRepair.printerInventoryNumber && (
+                <div className="border rounded-lg max-h-32 overflow-y-auto p-2 space-y-1">
+                  {store.cartridges
+                    .filter(c => c.printerInventoryNumber === newRepair.printerInventoryNumber && !c.isReplaced)
+                    .map(c => (
+                      <label key={c.id} className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={newRepair.selectedCartridgeIds.includes(c.id)}
+                          onChange={() => setNewRepair({
+                            ...newRepair,
+                            selectedCartridgeIds: newRepair.selectedCartridgeIds.includes(c.id)
+                              ? newRepair.selectedCartridgeIds.filter(id => id !== c.id)
+                              : [...newRepair.selectedCartridgeIds, c.id],
+                          })}
+                        />
+                        <span className="font-mono">{c.id}</span>
+                        <span>{c.model}</span>
+                      </label>
+                    ))}
+                </div>
+              )}
               <div className="flex space-x-2 pt-2">
                 <button type="button" onClick={() => setShowAdd(false)}
                   className="flex-1 py-2.5 border rounded-lg text-sm hover:bg-gray-50">Отмена</button>
@@ -347,6 +502,44 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700">Оформить</button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {editRepair && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-xl font-bold">Редактировать ремонт</h2>
+              <button onClick={() => setEditRepair(null)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Причина</label>
+                <textarea
+                  className="w-full p-2.5 border rounded-lg text-sm h-20"
+                  value={editRepair.reason}
+                  onChange={e => setEditRepair({ ...editRepair, reason: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Кто сдал</label>
+                <input
+                  className="w-full p-2.5 border rounded-lg text-sm"
+                  value={editRepair.technician ?? ''}
+                  onChange={e => setEditRepair({ ...editRepair, technician: e.target.value })}
+                />
+              </div>
+              <button
+                onClick={() => {
+                  store.updateRepair(editRepair.id, { reason: editRepair.reason, technician: editRepair.technician });
+                  setEditRepair(null);
+                }}
+                className="w-full py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700"
+              >
+                Сохранить
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -373,6 +566,31 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   onChange={e => setRepairDescription(e.target.value)}
                 />
               </div>
+              {(() => {
+                const p = store.printers.find(x => x.inventoryNumber === showFinish.printerInventoryNumber);
+                const already = !!p?.firmwareFlashed;
+                return (
+                  <label
+                    className={`flex items-start gap-2 text-sm rounded-lg border p-3 ${
+                      already ? 'bg-gray-50 border-gray-200 text-gray-500' : 'border-purple-100 bg-purple-50/50 text-gray-800'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 rounded border-gray-300 shrink-0"
+                      checked={already ? false : firmwareOnComplete}
+                      disabled={already}
+                      onChange={e => setFirmwareOnComplete(e.target.checked)}
+                    />
+                    <span>
+                      Выполнена прошивка принтера
+                      {already && (
+                        <span className="block text-xs text-gray-400 mt-0.5">Уже отмечен как прошитый — повторно нельзя</span>
+                      )}
+                    </span>
+                  </label>
+                );
+              })()}
               <div className="p-3 bg-green-50 border border-green-200 rounded-lg flex items-center space-x-2 text-sm text-green-700">
                 <AlertTriangle size={16} />
                 <span>Дата завершения будет установлена автоматически.</span>

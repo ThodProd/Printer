@@ -134,7 +134,7 @@ function buildMenu() {
 function ensureDataDirs() {
   const base = getDataDir();
 
-  ['', 'Logs', 'Backups', 'Config'].forEach(sub => {
+  ['', 'logs', 'backup', 'config', 'Logs', 'Backups', 'Config'].forEach(sub => {
     const dir = path.join(base, sub);
     if (!fs.existsSync(dir)) {
       try { fs.mkdirSync(dir, { recursive: true }); } catch {}
@@ -150,12 +150,38 @@ function getDataDir() {
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
   if (portableDir) return path.join(portableDir, 'Data');
 
-  // Installed app: keep data near installed executable.
-  return path.join(path.dirname(app.getPath('exe')), 'Data');
+  // Installed app: store under current user's Documents to avoid Program Files/ACL issues.
+  return path.join(app.getPath('documents'), 'CartridgeControl', 'Data');
 }
 
 function getDatabasePath() {
   return path.join(getDataDir(), 'database.json');
+}
+
+function appendAppLog(message) {
+  try {
+    ensureDataDirs();
+    const ts = new Date();
+    const file = path.join(getDataDir(), 'logs', `${ts.toISOString().slice(0, 10)}.log`);
+    fs.appendFileSync(file, `[${ts.toISOString()}] ${message}\n`, 'utf8');
+  } catch {}
+}
+
+let lastBackupAt = 0;
+function writeBackupSnapshot(data, reason = 'auto') {
+  try {
+    ensureDataDirs();
+    const now = Date.now();
+    if (reason === 'auto' && now - lastBackupAt < 5 * 60 * 1000) return null;
+    lastBackupAt = now;
+    const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(getDataDir(), 'backup', `database-${reason}-${stamp}.json`);
+    fs.writeFileSync(backupPath, JSON.stringify(data, null, 2), 'utf8');
+    appendAppLog(`backup created: ${backupPath}`);
+    return backupPath;
+  } catch {
+    return null;
+  }
 }
 
 app.whenReady().then(() => {
@@ -244,7 +270,18 @@ $ErrorActionPreference = 'Stop';
 $printerName = '${safePrinterName}';
 $filePath = '${safeFilePath}';
 try {
-  & print.exe /D:$printerName $filePath | Out-Null;
+  $printed = $false;
+  try {
+    & print.exe /D:$printerName $filePath | Out-Null;
+    $printed = $true;
+  } catch {}
+  if (-not $printed) {
+    Get-Content -LiteralPath $filePath -Raw -Encoding Default | Out-Printer -Name $printerName;
+    $printed = $true;
+  }
+  if (-not $printed) {
+    throw "Не удалось отправить в печать через стандартный драйвер Windows";
+  }
   Write-Output "OK";
 } catch {
   Write-Error $_.Exception.Message;
@@ -322,7 +359,7 @@ public class RawPrint {
       const encodedScript = Buffer.from(psScript, 'utf16le').toString('base64');
 
       exec(
-        `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`,
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`,
         { timeout: 20000 },
         (err, stdout, stderr) => {
           try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
@@ -358,6 +395,7 @@ ipcMain.handle('load-database', async () => {
       return { success: true, data: null, path: dbPath };
     }
     const raw = fs.readFileSync(dbPath, 'utf8');
+    appendAppLog(`database loaded: ${dbPath}`);
     return { success: true, data: JSON.parse(raw), path: dbPath };
   } catch (e) {
     return { success: false, error: String(e.message ?? e), path: getDatabasePath() };
@@ -371,6 +409,8 @@ ipcMain.handle('save-database', async (_event, data) => {
     const tmpPath = `${dbPath}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
     fs.renameSync(tmpPath, dbPath);
+    appendAppLog(`database saved: ${dbPath}`);
+    writeBackupSnapshot(data, 'auto');
     if (data && typeof data === 'object' && data.settings) {
       const settingsPath = path.join(getDataDir(), 'Config', 'settings.json');
       const settingsTmpPath = `${settingsPath}.tmp`;
@@ -380,6 +420,16 @@ ipcMain.handle('save-database', async (_event, data) => {
     return { success: true, path: dbPath };
   } catch (e) {
     return { success: false, error: String(e.message ?? e), path: getDatabasePath() };
+  }
+});
+
+ipcMain.handle('export-json-backup', async (_event, data) => {
+  try {
+    ensureDataDirs();
+    const backupPath = writeBackupSnapshot(data, 'export');
+    return { success: true, path: backupPath };
+  } catch (e) {
+    return { success: false, error: String(e.message ?? e) };
   }
 });
 

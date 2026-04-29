@@ -67,7 +67,7 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
     return {
       boss: boss || '',
-      programId: store.generatePrinterId(),
+      programId: store.generatePrinterId(inventoryNumber),
       inventoryNumber,
       printerType,
       model,
@@ -121,13 +121,15 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
       if (!hasConsumable) {
         const modelsToCreate = _isColor ? COLOR_CARTRIDGES : [{ color: undefined, label: printer.cartridgeModels[0] ?? '' }];
         modelsToCreate.forEach((item, index) => {
-          const id = store.generateConsumableId('cartridge');
+          const slot = store.allocateConsumableSlot(printer.inventoryNumber, 'cartridge', printer);
+          const id = store.generateConsumableId('cartridge', printer.inventoryNumber, slot);
           const cartridge: Cartridge = {
             id,
             barcode: id,
             model: _isColor ? (printer.cartridgeModels[index] ?? item.label) : item.label,
             color: item.color,
             consumableType: 'cartridge',
+            consumableSlot: slot,
             printerInventoryNumber: printer.inventoryNumber,
             status: 'on_hand',
             history: [{
@@ -142,12 +144,14 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
           createdCartridges += 1;
         });
         if (_drumModel) {
-          const id = store.generateConsumableId('drum');
+          const drumSlot = store.allocateConsumableSlot(printer.inventoryNumber, 'drum', printer);
+          const id = store.generateConsumableId('drum', printer.inventoryNumber, drumSlot);
           store.addCartridge({
             id,
             barcode: id,
             model: _drumModel,
             consumableType: 'drum',
+            consumableSlot: drumSlot,
             printerInventoryNumber: printer.inventoryNumber,
             status: 'on_hand',
             history: [{

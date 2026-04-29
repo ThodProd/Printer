@@ -27,6 +27,20 @@ interface InfoCardState {
   pendingAction: 'accept' | 'return' | 'receive_refill' | null;
 }
 
+interface PrinterIntakeState {
+  printer: Printer;
+  reason: string;
+  technician: string;
+  includeCartridges: boolean;
+  selectedCartridgeIds: string[];
+}
+
+interface PrinterReturnState {
+  repairId: string;
+  printer: Printer;
+  employee: string;
+}
+
 const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void }> = ({ store }) => {
   const [mode, setMode] = useState<'accept' | 'return' | 'receive_refill'>('accept');
   const [barcode, setBarcode] = useState('');
@@ -37,11 +51,15 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
   const [pendingCode, setPendingCode] = useState('');
   const [newForm, setNewForm] = useState({ printerInventoryNumber: '', model: '', department: '', boss: '' });
   const [recentOps, setRecentOps] = useState<Array<{ text: string; time: string; ok: boolean }>>([]);
+  const [fastReceiveMode, setFastReceiveMode] = useState(false);
+  const [centerNotice, setCenterNotice] = useState<string | null>(null);
+  const [printerIntake, setPrinterIntake] = useState<PrinterIntakeState | null>(null);
+  const [printerReturn, setPrinterReturn] = useState<PrinterReturnState | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!showNewForm && !infoCard) inputRef.current?.focus();
-  }, [mode, showNewForm, infoCard]);
+    if (!showNewForm && !infoCard && !printerIntake && !printerReturn) inputRef.current?.focus();
+  }, [mode, showNewForm, infoCard, printerIntake, printerReturn]);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -58,12 +76,110 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
   };
 
   const handleScan = (e: React.FormEvent) => {
+    const showCenterNotice = (text: string) => {
+      setCenterNotice(text);
+      window.setTimeout(() => setCenterNotice(null), 2200);
+    };
     e.preventDefault();
     const code = normalizeScannerCode(barcode.trim());
     if (!code) return;
     setBarcode('');
 
     const cartridge = store.cartridges.find(c => c.barcode === code || c.id === code);
+    const scannedPrinter = store.printers.find(
+      p => p.inventoryNumber.toLowerCase() === code.toLowerCase() || (p.programId ?? '').toLowerCase() === code.toLowerCase(),
+    );
+
+    if (!cartridge && scannedPrinter) {
+      if (mode !== 'accept' && mode !== 'receive_refill' && mode !== 'return') {
+        showCenterNotice('Принтер можно обработать только в режимах Прием/Прием с ремонта/Выдача');
+        return;
+      }
+      if (mode === 'return') {
+        const readyRepair = store.repairs.find(
+          r => r.printerInventoryNumber === scannedPrinter.inventoryNumber && r.locationStatus === 'ready',
+        );
+        if (!readyRepair) {
+          showCenterNotice(`Принтер ${scannedPrinter.inventoryNumber} не готов к выдаче`);
+          return;
+        }
+        setPrinterReturn({
+          repairId: readyRepair.id,
+          printer: scannedPrinter,
+          employee: readyRepair.technician ?? scannedPrinter.boss ?? '',
+        });
+        return;
+      }
+      const activeRepair = store.repairs.find(
+        r =>
+          r.printerInventoryNumber === scannedPrinter.inventoryNumber &&
+          (r.locationStatus ?? 'waiting') !== 'issued' &&
+          (r.status === 'in_repair' || r.status === 'waiting' || r.status === 'repaired'),
+      );
+      if (activeRepair) {
+        if (mode === 'receive_refill') {
+          if (activeRepair.locationStatus === 'ready') {
+            showCenterNotice(`Принтер ${scannedPrinter.inventoryNumber} уже готов к выдаче`);
+            return;
+          }
+          const isInSentBatch = store.batches.some(
+            b =>
+              b.status === 'sent' &&
+              (b.items?.some(i => i.kind === 'printer' && i.printerInventoryNumber === scannedPrinter.inventoryNumber) ??
+                b.cartridgeIds.includes(scannedPrinter.inventoryNumber)),
+          );
+          if (!isInSentBatch || activeRepair.locationStatus !== 'at_refill') {
+            showCenterNotice(`Принтер ${scannedPrinter.inventoryNumber} не находится в "На заправке — партии"`);
+            return;
+          }
+          store.updateRepair(activeRepair.id, {
+            status: 'repaired',
+            completionDate: new Date().toISOString(),
+            locationStatus: 'ready',
+            repairDescription: activeRepair.repairDescription ?? 'Принят с заправки по сканеру',
+          });
+          store.cartridges
+            .filter(c => c.linkedRepairId === activeRepair.id && c.status === 'at_refill')
+            .forEach(c => {
+              store.updateCartridgeStatus(c.id, 'received_from_refill', 'Принят с заправки вместе с принтером');
+            });
+          store.updatePrinter(scannedPrinter.inventoryNumber, { refillCount: (scannedPrinter.refillCount ?? 0) + 1 });
+          store.addRefillLog({
+            id: Math.random().toString(36).substr(2, 9),
+            date: new Date().toISOString(),
+            cartridgeId: scannedPrinter.programId ?? scannedPrinter.inventoryNumber,
+            cartridgeModel: scannedPrinter.model,
+            consumableType: 'device',
+            deviceType: scannedPrinter.printerType,
+            serviceType: 'receive',
+            printerInventoryNumber: scannedPrinter.inventoryNumber,
+            printerModel: scannedPrinter.model,
+            department: scannedPrinter.department ?? '',
+            employee: scannedPrinter.boss || undefined,
+            action: 'Принят с заправки (устройство, сканер)',
+          });
+          setMessage({ text: `✓ Устройство готово к выдаче: ${scannedPrinter.inventoryNumber}`, type: 'success' });
+          addOp(`Готово к выдаче: ${scannedPrinter.inventoryNumber}`, true);
+          return;
+        }
+        showCenterNotice(`Устройство уже в процессе: ${scannedPrinter.inventoryNumber}`);
+        return;
+      }
+      if (mode === 'receive_refill') {
+        showCenterNotice(`Устройство ${scannedPrinter.inventoryNumber} не найдено в ремонте`);
+        return;
+      }
+      const printerCartridges = store.cartridges
+        .filter(c => c.printerInventoryNumber === scannedPrinter.inventoryNumber && !c.isReplaced);
+      setPrinterIntake({
+        printer: scannedPrinter,
+        reason: '',
+        technician: scannedPrinter.boss ?? '',
+        includeCartridges: false,
+        selectedCartridgeIds: printerCartridges.map(c => c.id),
+      });
+      return;
+    }
 
     if (!cartridge) {
       if (mode === 'accept') {
@@ -72,9 +188,53 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         setShowNewForm(true);
         setMessage({ text: `Код «${code}» не найден — зарегистрируйте новый расходник.`, type: 'info' });
       } else {
-        setMessage({ text: `Расходник «${code}» не найден в базе!`, type: 'error' });
+        setCenterNotice(`Расходник «${code}» не найден в базе!`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
         addOp(`Не найден: ${code}`, false);
       }
+      return;
+    }
+
+    if (mode === 'accept') {
+      if (cartridge.status === 'waiting') {
+        showCenterNotice(`${cartridge.id} уже добавлен на склад`);
+        return;
+      }
+      if (cartridge.status === 'received_from_refill' || cartridge.status === 'ready') {
+        showCenterNotice(`${cartridge.id} имеет статус "Готов к выдаче"`);
+        return;
+      }
+    }
+
+    if (mode === 'receive_refill' && (cartridge.status === 'received_from_refill' || cartridge.status === 'ready')) {
+      showCenterNotice(`${cartridge.id} уже в статусе "Готов к выдаче"`);
+      return;
+    }
+
+    if (mode === 'receive_refill' && fastReceiveMode) {
+      if (cartridge.status !== 'at_refill') {
+        setCenterNotice(`${cartridge.id} не на заправке (статус: ${STATUS_LABELS[cartridge.status]}).`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
+        addOp(`Не на заправке: ${cartridge.id}`, false);
+        return;
+      }
+      store.updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Принят с заправки (быстрый режим)');
+      const fastPrinter = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+      store.addRefillLog({
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        cartridgeId: cartridge.id,
+        cartridgeModel: cartridge.model,
+        consumableType: cartridge.consumableType ?? 'cartridge',
+        deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+        serviceType: 'refill',
+        printerInventoryNumber: cartridge.printerInventoryNumber,
+        printerModel: fastPrinter?.model ?? '',
+        department: fastPrinter?.department ?? '',
+        action: 'Принят с заправки (быстрый режим)',
+      });
+      setMessage({ text: `✓ Принят с заправки: ${cartridge.id}`, type: 'success' });
+      addOp(`Получен с заправки: ${cartridge.id}`, true);
       return;
     }
 
@@ -92,13 +252,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
 
     if (pendingAction === 'accept') {
       if (cartridge.status === 'waiting') {
-        setMessage({ text: `${cartridge.id} уже на складе ожидания!`, type: 'error' });
+        setMessage({ text: `${cartridge.id} уже добавлен на склад`, type: 'info' });
         addOp(`Уже ожидает: ${cartridge.id}`, false);
       } else if (cartridge.status === 'at_refill') {
-        setMessage({ text: `${cartridge.id} на заправке — используйте режим «Прием с заправки».`, type: 'error' });
+        setCenterNotice(`${cartridge.id} на заправке — используйте режим «Прием с заправки».`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
         addOp(`На заправке: ${cartridge.id}`, false);
       } else {
-        store.updateCartridgeStatus(cartridge.id, 'waiting', 'Принят на склад (сдан на заправку)', employee);
+        store.updateCartridgeStatus(cartridge.id, 'waiting', 'Принят на склад (сдан на заправку)', employee, employee);
 
         // Save employee record if provided
         if (employee) {
@@ -126,6 +287,8 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+          serviceType: 'accept',
           department: printer?.department ?? '',
           employee,
           action: 'Принят на склад (сдан на заправку)',
@@ -136,7 +299,8 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       }
     } else if (pendingAction === 'receive_refill') {
       if (cartridge.status !== 'at_refill') {
-        setMessage({ text: `${cartridge.id} не на заправке (статус: ${STATUS_LABELS[cartridge.status]}).`, type: 'error' });
+        setCenterNotice(`${cartridge.id} не на заправке (статус: ${STATUS_LABELS[cartridge.status]}).`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
         addOp(`Не на заправке: ${cartridge.id}`, false);
       } else {
         store.updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Принят с заправки');
@@ -149,6 +313,8 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+          serviceType: 'receive',
           department: printer?.department ?? '',
           action: 'Принят с заправки',
         });
@@ -181,6 +347,8 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+          serviceType: 'issue',
           department: printer?.department ?? '',
           employee,
           action: 'Выдан пользователю',
@@ -188,10 +356,12 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         setMessage({ text: `✓ Выдан: ${cartridge.id}`, type: 'success' });
         addOp(`Выдан: ${cartridge.id}${employee ? ` (${employee})` : ''}`, true);
       } else if (cartridge.status === 'on_hand') {
-        setMessage({ text: `${cartridge.id} уже на руках.`, type: 'error' });
+        setCenterNotice(`${cartridge.id} уже на руках.`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
         addOp(`Уже на руках: ${cartridge.id}`, false);
       } else {
-        setMessage({ text: `Нельзя выдать — статус: ${STATUS_LABELS[cartridge.status]}.`, type: 'error' });
+        setCenterNotice(`Нельзя выдать — статус: ${STATUS_LABELS[cartridge.status]}.`);
+        window.setTimeout(() => setCenterNotice(null), 2200);
         addOp(`Нельзя выдать: ${cartridge.id}`, false);
       }
     }
@@ -200,24 +370,140 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
     setTimeout(() => inputRef.current?.focus(), 50);
   };
 
+  const handleConfirmPrinterIntake = () => {
+    if (!printerIntake) return;
+    const existingRepair = store.repairs.find(
+      r => r.printerInventoryNumber === printerIntake.printer.inventoryNumber && (r.locationStatus ?? 'waiting') !== 'issued',
+    );
+    if (existingRepair) {
+      setCenterNotice(`Устройство ${printerIntake.printer.inventoryNumber} уже находится в процессе`);
+      window.setTimeout(() => setCenterNotice(null), 2200);
+      return;
+    }
+    if (!printerIntake.reason.trim()) {
+      setCenterNotice('Укажите неисправность');
+      window.setTimeout(() => setCenterNotice(null), 2200);
+      return;
+    }
+    const repair: any = {
+      id: Math.random().toString(36).substr(2, 9),
+      printerInventoryNumber: printerIntake.printer.inventoryNumber,
+      date: new Date().toISOString(),
+      reason: printerIntake.reason.trim(),
+      status: 'waiting',
+      locationStatus: 'waiting',
+      technician: printerIntake.technician.trim() || undefined,
+      comment: 'Создано по сканированию',
+    };
+    store.addRepair(repair);
+    store.addRefillLog({
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: printerIntake.printer.programId ?? printerIntake.printer.inventoryNumber,
+      cartridgeModel: printerIntake.printer.model,
+      consumableType: 'device',
+      deviceType: printerIntake.printer.printerType,
+      serviceType: 'accept',
+      printerInventoryNumber: printerIntake.printer.inventoryNumber,
+      printerModel: printerIntake.printer.model,
+      department: printerIntake.printer.department ?? '',
+      employee: printerIntake.technician.trim() || undefined,
+      action: 'Принят на склад (устройство, ожидание отправки)',
+    });
+
+    if (printerIntake.includeCartridges) {
+      store.cartridges
+        .filter(c => printerIntake.selectedCartridgeIds.includes(c.id))
+        .forEach(c => {
+          if (c.status === 'on_hand') {
+            store.updateCartridgeStatus(
+              c.id,
+              'waiting',
+              'Принят на склад вместе с принтером',
+              printerIntake.technician.trim() || undefined,
+              printerIntake.technician.trim() || undefined,
+            );
+            store.updateCartridge(c.id, { linkedRepairId: repair.id });
+            const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
+            store.addRefillLog({
+              id: Math.random().toString(36).substr(2, 9),
+              date: new Date().toISOString(),
+              cartridgeId: c.id,
+              cartridgeModel: c.model,
+              consumableType: c.consumableType ?? 'cartridge',
+              deviceType: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
+              serviceType: 'accept',
+              printerInventoryNumber: c.printerInventoryNumber,
+              printerModel: printer?.model ?? '',
+              department: printer?.department ?? '',
+              employee: printerIntake.technician.trim() || undefined,
+              action: 'Принят на склад (вместе с принтером)',
+            });
+          }
+        });
+    }
+
+    setMessage({ text: `✓ Устройство принято: ${printerIntake.printer.inventoryNumber}`, type: 'success' });
+    addOp(`Склад+ремонт: ${printerIntake.printer.inventoryNumber}`, true);
+    setPrinterIntake(null);
+  };
+
+  const handleConfirmPrinterReturn = () => {
+    if (!printerReturn) return;
+    const employee = printerReturn.employee.trim() || undefined;
+    store.updateRepair(printerReturn.repairId, { locationStatus: 'issued' });
+    store.cartridges
+      .filter(c => c.linkedRepairId === printerReturn.repairId && (c.status === 'received_from_refill' || c.status === 'ready'))
+      .forEach(c => {
+        store.updateCartridgeStatus(c.id, 'on_hand', 'Выдан вместе с принтером', employee);
+      });
+    store.addRefillLog({
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: printerReturn.printer.programId ?? printerReturn.printer.inventoryNumber,
+      cartridgeModel: printerReturn.printer.model,
+      consumableType: 'device',
+      deviceType: printerReturn.printer.printerType,
+      serviceType: 'issue',
+      printerInventoryNumber: printerReturn.printer.inventoryNumber,
+      printerModel: printerReturn.printer.model,
+      department: printerReturn.printer.department ?? '',
+      employee,
+      action: 'Выдан пользователю (устройство, сканер)',
+    });
+    setMessage({ text: `✓ Выдан принтер: ${printerReturn.printer.inventoryNumber}`, type: 'success' });
+    addOp(`Выдан принтер: ${printerReturn.printer.inventoryNumber}`, true);
+    setPrinterReturn(null);
+  };
+
   const handleRegisterNew = (e: React.FormEvent) => {
     e.preventDefault();
-    const id = store.generateConsumableId('cartridge');
     const now = new Date().toISOString();
 
     const printerExists = store.printers.find(p => p.inventoryNumber === newForm.printerInventoryNumber);
-    if (!printerExists && newForm.printerInventoryNumber) {
-      store.addPrinter({
-        inventoryNumber: newForm.printerInventoryNumber,
-        model: 'Неизвестная модель',
-        printerType: 'printer',
-        department: newForm.department || '',
-        boss: newForm.boss || '',
-        cartridgeModels: [newForm.model].filter(Boolean),
-        commissionDate: '',
-        balanceCost: '',
-      });
+    const pendingPrinter =
+      !printerExists && newForm.printerInventoryNumber
+        ? {
+            inventoryNumber: newForm.printerInventoryNumber,
+            model: 'Неизвестная модель',
+            printerType: 'printer' as const,
+            department: newForm.department || '',
+            boss: newForm.boss || '',
+            cartridgeModels: [newForm.model].filter(Boolean),
+            commissionDate: '',
+            balanceCost: '',
+          }
+        : undefined;
+    if (pendingPrinter) {
+      store.addPrinter(pendingPrinter);
     }
+
+    const slot = store.allocateConsumableSlot(
+      newForm.printerInventoryNumber,
+      'cartridge',
+      pendingPrinter,
+    );
+    const id = store.generateConsumableId('cartridge', newForm.printerInventoryNumber, slot);
 
     const histEntry: HistoryEntry = {
       id: Math.random().toString(36).substr(2, 9),
@@ -230,6 +516,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       barcode: id,
       model: newForm.model,
       consumableType: 'cartridge',
+      consumableSlot: slot,
       printerInventoryNumber: newForm.printerInventoryNumber,
       status: 'waiting',
       history: [histEntry],
@@ -255,6 +542,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         balanceCost: printerExists?.balanceCost ?? '',
         consumableType: 'Картридж',
         status: STATUS_LABELS.waiting,
+        firmwareFlashed: !!printerExists?.firmwareFlashed,
       });
       window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     }
@@ -330,6 +618,17 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           />
           <button type="submit" className="sr-only">Обработать</button>
         </form>
+        {mode === 'receive_refill' && (
+          <label className="mt-3 inline-flex items-center gap-2 text-sm text-gray-600">
+            <input
+              type="checkbox"
+              checked={fastReceiveMode}
+              onChange={e => setFastReceiveMode(e.target.checked)}
+              className="rounded"
+            />
+            <span>Получать с заправки без карточки подтверждения</span>
+          </label>
+        )}
 
         {message && (
           <div className={`mt-5 p-4 rounded-lg flex items-center space-x-3 ${
@@ -344,6 +643,11 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           </div>
         )}
       </div>
+      {centerNotice && (
+        <div className="fixed left-1/2 top-24 -translate-x-1/2 z-50 px-6 py-3 bg-amber-100 border border-amber-300 text-amber-900 rounded-xl shadow-lg text-sm font-bold">
+          {centerNotice}
+        </div>
+      )}
 
       {/* Info Card Modal — opens on scan */}
       {infoCard && (
@@ -516,6 +820,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
                       balanceCost: printer?.balanceCost ?? '',
                       consumableType: infoCard.cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
                       status: STATUS_LABELS[infoCard.cartridge.status],
+                      firmwareFlashed: !!printer?.firmwareFlashed,
                     });
                     await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
                   }}
@@ -526,6 +831,103 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
                   <span>Напечатать этикетку</span>
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Register New Cartridge Modal */}
+      {printerIntake && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold">Принять принтер в ремонт</h2>
+              <button onClick={() => setPrinterIntake(null)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="space-y-3">
+              <div className="text-sm bg-gray-50 p-3 rounded-lg">
+                <div className="font-bold">{printerIntake.printer.inventoryNumber}</div>
+                <div className="text-gray-500">{printerIntake.printer.model}</div>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Неисправность *</label>
+                <textarea
+                  className="w-full p-2.5 border rounded-lg text-sm h-20 resize-none"
+                  value={printerIntake.reason}
+                  onChange={e => setPrinterIntake({ ...printerIntake, reason: e.target.value })}
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Чей принтер</label>
+                <input
+                  className="w-full p-2.5 border rounded-lg text-sm"
+                  value={printerIntake.technician}
+                  onChange={e => setPrinterIntake({ ...printerIntake, technician: e.target.value })}
+                />
+              </div>
+              <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={printerIntake.includeCartridges}
+                  onChange={e => setPrinterIntake({ ...printerIntake, includeCartridges: e.target.checked })}
+                />
+                <span>Добавить картриджи этого принтера в ожидание отправки</span>
+              </label>
+              {printerIntake.includeCartridges && (
+                <div className="border rounded-lg p-2 max-h-40 overflow-y-auto space-y-1">
+                  {store.cartridges
+                    .filter(c => c.printerInventoryNumber === printerIntake.printer.inventoryNumber && !c.isReplaced)
+                    .map(c => (
+                      <label key={c.id} className="flex items-center gap-2 text-xs">
+                        <input
+                          type="checkbox"
+                          checked={printerIntake.selectedCartridgeIds.includes(c.id)}
+                          onChange={() => setPrinterIntake({
+                            ...printerIntake,
+                            selectedCartridgeIds: printerIntake.selectedCartridgeIds.includes(c.id)
+                              ? printerIntake.selectedCartridgeIds.filter(x => x !== c.id)
+                              : [...printerIntake.selectedCartridgeIds, c.id],
+                          })}
+                        />
+                        <span className="font-mono">{c.id}</span>
+                        <span>{c.model}</span>
+                      </label>
+                    ))}
+                </div>
+              )}
+              <div className="flex gap-2 pt-1">
+                <button onClick={() => setPrinterIntake(null)} className="flex-1 py-2.5 border rounded-lg text-sm">Отмена</button>
+                <button onClick={handleConfirmPrinterIntake} className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold">Принять</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {printerReturn && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold">Выдать принтер</h2>
+              <button onClick={() => setPrinterReturn(null)} className="text-gray-400 hover:text-gray-600"><X size={20} /></button>
+            </div>
+            <div className="space-y-3">
+              <div className="text-sm bg-gray-50 p-3 rounded-lg">
+                <div className="font-bold">{printerReturn.printer.inventoryNumber}</div>
+                <div className="text-gray-500">{printerReturn.printer.model}</div>
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Кто забрал</label>
+                <input
+                  className="w-full p-2.5 border rounded-lg text-sm"
+                  value={printerReturn.employee}
+                  onChange={e => setPrinterReturn({ ...printerReturn, employee: e.target.value })}
+                />
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button onClick={() => setPrinterReturn(null)} className="flex-1 py-2.5 border rounded-lg text-sm">Отмена</button>
+                <button onClick={handleConfirmPrinterReturn} className="flex-1 py-2.5 bg-green-600 text-white rounded-lg text-sm font-bold">Выдать</button>
+              </div>
             </div>
           </div>
         </div>

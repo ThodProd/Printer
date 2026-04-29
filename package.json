@@ -14,7 +14,11 @@
     "electron:dev": "cross-env NODE_ENV=development electron .",
     "electron:build": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win zip dir --x64 --publish never",
     "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win zip dir --x64 --publish never",
-    "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never"
+    "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never",
+    "dist:all": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis zip dir --x64 --publish never",
+    "gitnexus:analyze": "gitnexus analyze --skip-git .",
+    "gitnexus:serve": "gitnexus serve",
+    "gitnexus:graph": "gitnexus analyze --skip-git . && gitnexus serve"
   },
   "build": {
     "appId": "com.cartridgecontrol.app",
@@ -38,7 +42,9 @@
       {
         "from": "drivers/",
         "to": "drivers/",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -46,11 +52,15 @@
       "target": [
         {
           "target": "zip",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "dir",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "forceCodeSigning": false
@@ -83,6 +93,7 @@
     "cross-env": "^7.0.3",
     "electron": "^36.2.0",
     "electron-builder": "^26.0.12",
+    "gitnexus": "^1.6.4-rc.21",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.2.4",

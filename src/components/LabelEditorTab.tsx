@@ -55,6 +55,8 @@ const VARIABLE_TAGS = [
   { tag: '{description}', label: 'Описание' },
   { tag: '{vendor}', label: 'Модель принтера для новых картриджей' },
   { tag: '{date}', label: 'Дата' },
+  { tag: '{fw}', label: 'Метка «прошит» у принтера (П или пусто)' },
+  { tag: '{firmware}', label: 'То же, что {fw}' },
 ];
 
 const FONT_OPTIONS = [
@@ -86,7 +88,86 @@ function resolveContent(tpl: string): string {
     .replace(/\{location\}/g, 'Склад')
     .replace(/\{description\}/g, 'Описание')
     .replace(/\{vendor\}/g, TEST_MODEL)
-    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
+    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
+    .replace(/\{fw\}/g, 'П')
+    .replace(/\{firmware\}/g, 'П');
+}
+
+function parseTsplToTemplate(tspl: string, fallback: LabelTemplate): LabelTemplate {
+  const lines = tspl.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  const sizeMatch = lines.find(l => /^SIZE\s+/i.test(l))?.match(/^SIZE\s+([\d.]+)\s*mm,\s*([\d.]+)\s*mm$/i);
+  const width = sizeMatch ? Number(sizeMatch[1]) : fallback.width;
+  const height = sizeMatch ? Number(sizeMatch[2]) : fallback.height;
+  let idx = 0;
+  const parsed: LabelElement[] = [];
+  lines.forEach(line => {
+    const textMatch = line.match(/^TEXT\s+(\d+),(\d+),"([^"]+)",(\d+),(\d+),(\d+),"(.*)"$/i);
+    if (textMatch) {
+      const scale = Number(textMatch[5]) || 1;
+      parsed.push({
+        id: `tspl_text_${idx++}`,
+        type: 'text',
+        x: Number(textMatch[1]),
+        y: Number(textMatch[2]),
+        width: Math.max(20, (textMatch[7]?.length ?? 1) * 8 * scale),
+        height: Math.max(12, 16 * scale),
+        textTag: textMatch[3],
+        rotation: Number(textMatch[4]) || 0,
+        fontScale: scale,
+        content: textMatch[7],
+      });
+      return;
+    }
+    const barcodeMatch = line.match(/^BARCODE\s+(\d+),(\d+),"([^"]+)",(\d+),(\d+),(\d+),(\d+),(\d+),"(.*)"$/i);
+    if (barcodeMatch) {
+      parsed.push({
+        id: `tspl_barcode_${idx++}`,
+        type: 'barcode',
+        x: Number(barcodeMatch[1]),
+        y: Number(barcodeMatch[2]),
+        width: 220,
+        height: Number(barcodeMatch[4]) || 60,
+        barcodeType: barcodeMatch[3],
+        barcodeHeight: Number(barcodeMatch[4]) || 60,
+        rotation: Number(barcodeMatch[6]) || 0,
+        content: barcodeMatch[9] || '{id}',
+      });
+      return;
+    }
+    const qrMatch = line.match(/^QRCODE\s+(\d+),(\d+),M,(\d+),A,(\d+),"(.+)"$/i);
+    if (qrMatch) {
+      const s = Number(qrMatch[3]) || 3;
+      parsed.push({
+        id: `tspl_qr_${idx++}`,
+        type: 'qrcode',
+        x: Number(qrMatch[1]),
+        y: Number(qrMatch[2]),
+        width: s * 20,
+        height: s * 20,
+        fontScale: s,
+        rotation: Number(qrMatch[4]) || 0,
+        content: qrMatch[5] || '{id}',
+      });
+    }
+  });
+
+  const existingByIdx = fallback.elements;
+  const elements = parsed.map((el, i) => {
+    const old = existingByIdx[i];
+    if (!old || old.type !== el.type) return el;
+    return {
+      ...el,
+      id: old.id,
+      width: el.width || old.width,
+      height: el.height || old.height,
+    };
+  });
+
+  return {
+    width,
+    height,
+    elements: elements.length > 0 ? elements : fallback.elements,
+  };
 }
 
 const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
@@ -131,6 +212,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
         location: '{location}',
         description: '{description}',
         vendor: '{vendor}',
+        firmwareFlashed: true,
       },
       { ignoreCustomTspl: true },
     );
@@ -153,11 +235,13 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const canvasH = template.height * canvasScale;
 
   const selectedEl = template.elements.find(e => e.id === selectedId) ?? null;
+  const [isTsplEditing, setIsTsplEditing] = useState(false);
 
   const syncTemplateAndTspl = (updater: (current: LabelTemplate) => LabelTemplate) => {
     setTemplate(current => {
       const next = updater(current);
       setEditableTspl(buildEditorTspl(next));
+      setIsTsplEditing(false);
       setSaved(false);
       return next;
     });
@@ -241,8 +325,10 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
   }, [handleMouseMove, handleMouseUp]);
 
   useEffect(() => {
-    if (!settings.labelTsplTemplate) setEditableTspl(generatedTspl);
-  }, [generatedTspl, settings.labelTsplTemplate]);
+    if (!isTsplEditing) {
+      setEditableTspl(generatedTspl);
+    }
+  }, [generatedTspl, isTsplEditing]);
 
   const handleSave = () => {
     const updated: AppSettings = {
@@ -261,6 +347,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setTemplate({ ...DEFAULT_LABEL_TEMPLATE, width: 43, height: 15 });
     setSelectedId(null);
     setEditableTspl(DEFAULT_LABEL_TSPL_TEMPLATE);
+    setIsTsplEditing(true);
   };
 
   const renderElPreview = (el: LabelElement) => {
@@ -348,7 +435,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 h-full min-h-0 flex flex-col">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800 flex items-center space-x-2">
           <AlignLeft size={22} className="text-blue-600" />
@@ -374,9 +461,9 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-5 flex-1 min-h-0">
         {/* Left: controls */}
-        <div className="space-y-4">
+        <div className="space-y-4 min-h-0">
           {/* Canvas size */}
           <div className="bg-white rounded-xl border p-4 space-y-3">
             <h3 className="font-bold text-gray-700 text-sm">Размер наклейки (мм)</h3>
@@ -555,14 +642,44 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
             </div>
           </div>
 
+          <div className="bg-white rounded-xl border p-4">
+            <h3 className="font-bold text-gray-700 text-sm mb-2">Список элементов</h3>
+            <div className="space-y-1 max-h-56 overflow-auto">
+              {template.elements.map(el => (
+                <div
+                  key={el.id}
+                  onClick={() => setSelectedId(el.id)}
+                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs transition-colors ${
+                    selectedId === el.id ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50 border border-transparent'
+                  }`}
+                >
+                  <div className="flex items-center space-x-2">
+                    <span className={`px-1.5 py-0.5 rounded font-bold ${
+                      el.type === 'text' ? 'bg-gray-100 text-gray-700' :
+                      el.type === 'barcode' ? 'bg-blue-100 text-blue-700' :
+                      'bg-green-100 text-green-700'
+                    }`}>
+                      {el.type === 'text' ? 'ТЕКСТ' : el.type === 'barcode' ? 'БАРКОД' : 'QR'}
+                    </span>
+                    <span className="font-mono text-gray-600">{el.content}</span>
+                  </div>
+                  <button onClick={e => { e.stopPropagation(); deleteEl(el.id); }} className="text-red-300 hover:text-red-500">
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className="bg-blue-50 border border-blue-200 rounded-xl p-3 text-xs text-blue-800 space-y-1">
             <p className="font-bold flex items-center space-x-1"><Info size={12} /><span>Координаты в dots (точках)</span></p>
             <p>TSC TTP-225: 203 DPI → 1 мм ≈ 8 dots. Этикетка {template.width}×{template.height} мм = {template.width * DOTS_PER_MM}×{template.height * DOTS_PER_MM} dots.</p>
+            <p>Верхняя часть этикетки имеет техническую непечатаемую зону. Для надёжной печати начинайте элементы примерно с Y=8..12 dots.</p>
           </div>
         </div>
 
         {/* Center: canvas */}
-        <div className="xl:col-span-2 space-y-4">
+        <div className="xl:col-span-2 space-y-4 min-h-0 flex flex-col">
           <div className="bg-white rounded-xl border p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="text-xs text-gray-400 uppercase font-bold">
@@ -594,6 +711,11 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 style={{ width: canvasW, height: canvasH, flexShrink: 0 }}
                 onClick={e => { if (e.target === canvasRef.current) setSelectedId(null); }}
               >
+                <div
+                  className="absolute left-0 top-0 w-full bg-red-100/60 border-b border-red-200 pointer-events-none"
+                  style={{ height: 8 * dotScale }}
+                  title="Непечатаемая верхняя зона"
+                />
                 {template.elements.map(renderElPreview)}
               </div>
             </div>
@@ -605,7 +727,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
           </div>
 
           {/* TSPL Preview */}
-          <div className="bg-gray-900 rounded-xl p-4 font-mono text-xs text-green-400 overflow-x-auto space-y-2">
+          <div className="bg-gray-900 rounded-xl p-4 font-mono text-xs text-green-400 overflow-x-auto space-y-2 flex-1 min-h-0 flex flex-col">
             <div className="flex items-center justify-between gap-2">
               <div className="text-gray-500 uppercase text-xs">Генерируемый TSPL (тестовые данные)</div>
               <div className="flex items-center gap-2">
@@ -617,12 +739,15 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 <button
                   type="button"
                   onClick={() => {
-                    setEditableTspl(generatedTspl);
+                    setEditableTspl(DEFAULT_LABEL_TSPL_TEMPLATE);
+                    setTemplate(current => parseTsplToTemplate(DEFAULT_LABEL_TSPL_TEMPLATE, current));
+                    setIsTsplEditing(true);
+                    setSaved(false);
                   }}
                   className="flex items-center space-x-1 px-2 py-1 bg-gray-800 text-gray-300 rounded text-xs hover:bg-gray-700"
                 >
                   <RotateCcw size={11} />
-                  <span>Обновить</span>
+                  <span>Восстановить дефолт</span>
                 </button>
                 <button
                   type="button"
@@ -637,46 +762,18 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <textarea
               value={editableTspl}
               onChange={e => {
-                setEditableTspl(e.target.value);
+                const next = e.target.value;
+                setEditableTspl(next);
+                setIsTsplEditing(true);
+                setTemplate(current => parseTsplToTemplate(next, current));
                 setSaved(false);
               }}
               spellCheck={false}
-              className="w-full min-h-56 p-3 bg-gray-950 border border-gray-700 rounded-lg text-green-400 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-blue-500 resize-y"
+              className="w-full h-full min-h-56 p-3 bg-gray-950 border border-gray-700 rounded-lg text-green-400 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-blue-500 resize-none"
             />
             <p className="text-gray-500 text-[11px] font-sans">
               Это единственный шаблон этикетки. Что сохранено здесь, то отправляется на печать. Для переменных используйте {`{id}`}, {`{inv}`}, {`{model}`}, {`{cartModel}`}, {`{date}`}.
             </p>
-          </div>
-
-          {/* Elements list */}
-          <div className="bg-white rounded-xl border p-4">
-            <h3 className="font-bold text-gray-700 text-sm mb-2">Список элементов</h3>
-            <div className="space-y-1">
-              {template.elements.map(el => (
-                <div
-                  key={el.id}
-                  onClick={() => setSelectedId(el.id)}
-                  className={`flex items-center justify-between p-2 rounded cursor-pointer text-xs transition-colors ${
-                    selectedId === el.id ? 'bg-blue-50 border border-blue-200' : 'hover:bg-gray-50 border border-transparent'
-                  }`}
-                >
-                  <div className="flex items-center space-x-2">
-                    <span className={`px-1.5 py-0.5 rounded font-bold ${
-                      el.type === 'text' ? 'bg-gray-100 text-gray-700' :
-                      el.type === 'barcode' ? 'bg-blue-100 text-blue-700' :
-                      'bg-green-100 text-green-700'
-                    }`}>
-                      {el.type === 'text' ? 'ТЕКСТ' : el.type === 'barcode' ? 'БАРКОД' : 'QR'}
-                    </span>
-                    <span className="font-mono text-gray-600">{el.content}</span>
-                    <span className="text-gray-400">({el.x},{el.y}) {el.width}×{el.height}dots</span>
-                  </div>
-                  <button onClick={e => { e.stopPropagation(); deleteEl(el.id); }} className="text-red-300 hover:text-red-500">
-                    <Trash2 size={13} />
-                  </button>
-                </div>
-              ))}
-            </div>
           </div>
         </div>
       </div>

@@ -5,43 +5,146 @@ import {
   CheckCircle2, AlertCircle, X, Barcode as BarcodeIcon, ChevronRight,
 } from 'lucide-react';
 import Barcode from 'react-barcode';
-import { Cartridge, STATUS_LABELS } from '../types';
+import { Cartridge, LabelTemplate, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
-import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { buildTSPLLabel, DOTS_PER_MM, getTemplate } from '../utils/tspl';
+import { useStickyState } from '../utils/useStickyState';
 
-/** Render a simple preview canvas that mirrors the configured label template */
+const PREVIEW_DOTS_SCALE = 0.35;
+
+function resolvePreviewContent(
+  tpl: string,
+  data: {
+    id: string;
+    inv: string;
+    cartModel?: string;
+    printerModel?: string;
+    fio?: string;
+    boss?: string;
+    employee?: string;
+    department?: string;
+    printerType?: string;
+    commissionDate?: string;
+    balanceCost?: string;
+    consumableType?: string;
+    status?: string;
+    quantity?: string | number;
+    location?: string;
+    description?: string;
+    vendor?: string;
+    firmwareFlashed?: boolean;
+  },
+): string {
+  const printerModel = data.printerModel ?? '';
+  const fio = data.fio ?? data.boss ?? data.employee ?? '';
+  const firmware = data.firmwareFlashed ? 'П' : '';
+  return tpl
+    .replace(/\{id\}/g, data.id)
+    .replace(/\{inv\}/g, data.inv)
+    .replace(/\{model\}/g, printerModel)
+    .replace(/\{printerModel\}/g, printerModel)
+    .replace(/\{cartModel\}/g, data.cartModel ?? '')
+    .replace(/\{fio\}/g, fio)
+    .replace(/\{boss\}/g, fio)
+    .replace(/\{employee\}/g, fio)
+    .replace(/\{department\}/g, data.department ?? '')
+    .replace(/\{printerType\}/g, data.printerType ?? '')
+    .replace(/\{commissionDate\}/g, data.commissionDate ?? '')
+    .replace(/\{balanceCost\}/g, data.balanceCost ?? '')
+    .replace(/\{consumableType\}/g, data.consumableType ?? '')
+    .replace(/\{status\}/g, data.status ?? '')
+    .replace(/\{quantity\}/g, String(data.quantity ?? ''))
+    .replace(/\{location\}/g, data.location ?? '')
+    .replace(/\{description\}/g, data.description ?? '')
+    .replace(/\{vendor\}/g, data.vendor ?? '')
+    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
+    .replace(/\{fw\}/g, firmware)
+    .replace(/\{firmware\}/g, firmware);
+}
+
+/** Render preview from the same template/settings used for printing */
 const LabelPreview: React.FC<{
-  data: { id: string; inv: string; cartModel?: string; printerModel?: string };
-}> = ({ data }) => {
+  template: LabelTemplate;
+  data: {
+    id: string;
+    inv: string;
+    cartModel?: string;
+    printerModel?: string;
+    fio?: string;
+    boss?: string;
+    employee?: string;
+    department?: string;
+    printerType?: string;
+    commissionDate?: string;
+    balanceCost?: string;
+    consumableType?: string;
+    status?: string;
+    quantity?: string | number;
+    location?: string;
+    description?: string;
+    vendor?: string;
+    firmwareFlashed?: boolean;
+  };
+}> = ({ template, data }) => {
+  const canvasW = Math.max(160, template.width * DOTS_PER_MM * PREVIEW_DOTS_SCALE);
+  const canvasH = Math.max(56, template.height * DOTS_PER_MM * PREVIEW_DOTS_SCALE);
+  const renderElement = (el: LabelTemplate['elements'][number]) => {
+    const content = resolvePreviewContent(el.content, data);
+    const style: React.CSSProperties = {
+      position: 'absolute',
+      left: el.x * PREVIEW_DOTS_SCALE,
+      top: el.y * PREVIEW_DOTS_SCALE,
+      width: Math.max(8, el.width * PREVIEW_DOTS_SCALE),
+      height: Math.max(8, el.height * PREVIEW_DOTS_SCALE),
+      overflow: 'hidden',
+      pointerEvents: 'none',
+    };
+    if (el.type === 'barcode') {
+      const barcodeHeight = Math.max(8, (el.barcodeHeight ?? el.height ?? 30) * PREVIEW_DOTS_SCALE);
+      return (
+        <div key={el.id} style={style}>
+          <Barcode
+            value={content || 'CODE'}
+            width={1}
+            height={barcodeHeight}
+            fontSize={0}
+            margin={0}
+            displayValue={false}
+          />
+        </div>
+      );
+    }
+    if (el.type === 'qrcode') {
+      return (
+        <div key={el.id} style={style} className="bg-black text-white text-[8px] flex items-center justify-center">
+          QR
+        </div>
+      );
+    }
+    const fontScale = el.fontScale ?? 1;
+    return (
+      <div
+        key={el.id}
+        style={style}
+        className="text-[9px] font-mono font-semibold whitespace-nowrap text-gray-700"
+      >
+        <span style={{ fontSize: `${Math.max(8, fontScale * 8)}px` }}>{content || ' '}</span>
+      </div>
+    );
+  };
+
   return (
     <div
-      className="bg-white border-2 border-dashed border-gray-300 relative overflow-hidden flex flex-col"
-      style={{ width: 280, minHeight: 100, padding: '6px 8px' }}
+      className="bg-white border-2 border-dashed border-gray-300 relative overflow-hidden"
+      style={{ width: canvasW, height: canvasH }}
     >
-      {/* Barcode */}
-      <div className="flex justify-center">
-        <Barcode
-          value={data.id || 'CODE'}
-          width={1.2}
-          height={48}
-          fontSize={0}
-          margin={0}
-          displayValue={false}
-        />
-      </div>
-      <div className="text-center font-mono text-[9px] font-bold text-gray-700 mt-0.5 truncate">{data.id}</div>
-      {data.inv && (
-        <div className="text-center text-[8px] text-gray-500 truncate">{data.inv}</div>
-      )}
-      {data.cartModel && (
-        <div className="text-center text-[8px] text-gray-400 truncate">{data.cartModel}</div>
-      )}
+      {template.elements.map(renderElement)}
     </div>
   );
 };
 
 const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [printerSearch, setPrinterSearch] = useState('');
+  const [printerSearch, setPrinterSearch] = useStickyState('search_printing', '');
   const [selectedPrinterInv, setSelectedPrinterInv] = useState('');
   const [selectedCartridgeId, setSelectedCartridgeId] = useState('');
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
@@ -90,6 +193,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
       balanceCost: printer?.balanceCost ?? '',
       consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cartridge.status],
+      firmwareFlashed: !!printer?.firmwareFlashed,
     };
   };
 
@@ -138,6 +242,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
     store.setBatches(prev => prev.map(batch => ({
       ...batch,
       cartridgeIds: batch.cartridgeIds.map(id => id === oldId ? newId : id),
+      items: (batch.items ?? []).map(item => item.kind === 'cartridge' && item.id === oldId ? { ...item, id: newId } : item),
     })));
     store.setRefillLog(prev => prev.map(entry => entry.cartridgeId === oldId ? { ...entry, cartridgeId: newId } : entry));
     setSelectedCartridgeId(newId);
@@ -164,6 +269,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
       printerType: selectedPrinter.printerType,
       commissionDate: selectedPrinter.commissionDate,
       balanceCost: selectedPrinter.balanceCost,
+      firmwareFlashed: !!selectedPrinter.firmwareFlashed,
     });
     const res = await window.electronAPI.rawPrint(cfg.labelPrinterName, tspl, cfg.labelPrintMode);
     setPrintStatus(res.success
@@ -175,13 +281,13 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!selectedPrinter) return;
     const oldId = selectedPrinter.programId ?? selectedPrinter.inventoryNumber;
     if (!confirm(`Заменить ID принтера ${oldId} на новый? Этикетка печататься не будет.`)) return;
-    const newId = store.generatePrinterId();
+    const newId = store.generatePrinterId(selectedPrinter.inventoryNumber);
     store.updatePrinter(selectedPrinter.inventoryNumber, { programId: newId });
     setPrintStatus({ text: `ID принтера заменён: ${oldId} → ${newId}`, ok: true });
   };
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 h-full min-h-0 flex flex-col">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800 flex items-center space-x-2">
           <BarcodeIcon size={22} className="text-blue-600" />
@@ -206,7 +312,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 flex-1 min-h-0">
         {/* Step 1: Select Printer */}
         <div className="bg-white rounded-xl border p-4 space-y-3">
           <h3 className="font-bold text-sm text-gray-700 flex items-center space-x-2">
@@ -225,7 +331,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
             />
           </div>
 
-          <div className="max-h-72 overflow-y-auto space-y-1">
+          <div className="max-h-[calc(100vh-320px)] overflow-y-auto space-y-1">
             {filteredPrinters.length === 0 ? (
               <div className="text-gray-300 italic text-xs py-4 text-center">Нет принтеров</div>
             ) : (
@@ -276,7 +382,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
           ) : printerCartridges.length === 0 ? (
             <div className="text-gray-300 italic text-xs py-4 text-center">Нет расходников для этого принтера</div>
           ) : (
-            <div className="space-y-1 max-h-72 overflow-y-auto">
+            <div className="space-y-1 max-h-[calc(100vh-320px)] overflow-y-auto">
               {printerCartridges.map(c => (
                 <button
                   key={c.id}
@@ -301,7 +407,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     {c.status === 'on_hand' ? 'На руках' :
                      c.status === 'at_refill' ? 'На заправке' :
                      c.status === 'waiting' ? 'Ожидает' :
-                     c.status}
+                     (STATUS_LABELS[c.status] ?? 'Статус неизвестен')}
                   </div>
                 </button>
               ))}
@@ -378,10 +484,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <div className="text-xs text-gray-400 uppercase font-bold">
                 Превью ({cfg.labelWidth}×{cfg.labelHeight} мм)
               </div>
-              <LabelPreview data={buildData(selectedCartridge)} />
-              <p className="text-xs text-gray-400 text-center">
-                Точный вид — в Настройках → Редактор этикетки
-              </p>
+              <LabelPreview template={template} data={buildData(selectedCartridge)} />
             </div>
           )}
         </div>

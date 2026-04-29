@@ -19,9 +19,10 @@ import {
 import { Cartridge, Printer, HistoryEntry, STATUS_LABELS, STATUS_COLORS } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { useStickyState } from '../utils/useStickyState';
 
 const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useStickyState('search_global', '');
   const [selectedPrinter, setSelectedPrinter] = useState<Printer | null>(null);
   const [selectedCartridge, setSelectedCartridge] = useState<Cartridge | null>(null);
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
@@ -94,6 +95,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       balanceCost: printer?.balanceCost ?? '',
       consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cartridge.status],
+      firmwareFlashed: !!printer?.firmwareFlashed,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus(res.success
@@ -124,6 +126,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       printerType: printer.printerType,
       commissionDate: printer.commissionDate,
       balanceCost: printer.balanceCost,
+      firmwareFlashed: !!printer.firmwareFlashed,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus(res.success
@@ -198,7 +201,12 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                             <span className="font-mono">{p.programId}</span>
                           </div>
                         )}
-                        <div className="text-sm text-gray-600">{p.model}</div>
+                        <div className="text-sm text-gray-600 flex items-center gap-1.5 flex-wrap">
+                          <span>{p.model}</span>
+                          {p.firmwareFlashed && (
+                            <span className="inline-block w-2 h-2 rounded-full bg-red-500 shrink-0" title="Прошит" />
+                          )}
+                        </div>
                         <div className="text-xs text-gray-400 mt-0.5">{p.department}{p.boss ? ` — ${p.boss}` : ''}</div>
                       </div>
                       <div className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full shrink-0 ml-2">
@@ -292,7 +300,12 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         <span className="font-mono">ID: {selectedPrinter.programId}</span>
                       </div>
                     )}
-                    <p className="opacity-80 text-sm mt-0.5">{selectedPrinter.model}</p>
+                    <p className="opacity-80 text-sm mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>{selectedPrinter.model}</span>
+                      {selectedPrinter.firmwareFlashed && (
+                        <span className="inline-block w-2 h-2 rounded-full bg-red-400 shrink-0" title="Прошит" />
+                      )}
+                    </p>
                   </div>
                   <PrinterIcon size={28} className="opacity-40" />
                 </div>

@@ -8,6 +8,7 @@ import * as XLSX from 'xlsx';
 import { NewCartridge } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { useStickyState } from '../utils/useStickyState';
 
 const EMPTY: Omit<NewCartridge, 'id' | 'registrationDate'> = {
   model: '',
@@ -21,7 +22,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState<NewCartridge | null>(null);
   const [form, setForm] = useState<Omit<NewCartridge, 'id' | 'registrationDate'>>(EMPTY);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useStickyState('search_new_cartridges', '');
   const [printStatus, setPrintStatus] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
@@ -134,6 +135,12 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       return;
     }
     const template = getTemplate(store.settings);
+    const vendorTrim = item.vendor?.trim() ?? '';
+    const printerForFw = vendorTrim
+      ? store.printers.find(
+          p => p.model.trim().toLowerCase() === vendorTrim.toLowerCase(),
+        )
+      : undefined;
     const tspl = buildTSPLLabel(template, store.settings, {
       id: item.id,
       inv: '',
@@ -145,6 +152,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       vendor: item.vendor ?? '',
       status: 'Новый на складе',
       consumableType: 'Новый картридж',
+      firmwareFlashed: printerForFw?.firmwareFlashed === true,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus({

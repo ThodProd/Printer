@@ -21,11 +21,11 @@ export const STATUS_LABELS: Record<CartridgeStatus, string> = {
   received_from_refill: 'Готов к выдаче',
   ready: 'Готов к выдаче',
   replaced: 'Заменён',
-  disposed: 'Утилизирован',
+  disposed: 'Списан',
 };
 
 export const STATUS_COLORS: Record<CartridgeStatus, string> = {
-  on_hand: 'bg-blue-100 text-blue-700',
+  on_hand: 'bg-sky-100 text-sky-700',
   waiting: 'bg-yellow-100 text-yellow-700',
   at_refill: 'bg-purple-100 text-purple-700',
   received_from_refill: 'bg-green-100 text-green-700',
@@ -56,6 +56,10 @@ export interface Cartridge {
   refillCount: number;
   registrationDate: string;
   lastSubmittedBy?: string;
+  /** If set, cartridge is logically bundled with this printer repair workflow */
+  linkedRepairId?: string;
+  /** Порядковый номер расходника у принтера (Картридж 2 / Драм 2); не уменьшается при удалении */
+  consumableSlot?: number;
 }
 
 export interface Printer {
@@ -70,6 +74,14 @@ export interface Printer {
   cartridgeModels: string[];
   commissionDate: string;
   balanceCost: string;
+  refillCount?: number;
+  repairCount?: number;
+  /** Прошивка выполнена — на этикетке {fw} печатается «П»; красная точка в списках; снять нельзя из UI */
+  firmwareFlashed?: boolean;
+  /** Последний выданный номер слота для картриджей (монотонно, для ID и подписи «Картридж N») */
+  consumableCartridgeSeq?: number;
+  /** То же для драмов */
+  consumableDrumSeq?: number;
 }
 
 export interface RepairEntry {
@@ -82,12 +94,22 @@ export interface RepairEntry {
   status: 'waiting' | 'in_repair' | 'repaired';
   comment?: string;
   technician?: string;
+  /** Workflow state shown in repair/inventory tabs */
+  locationStatus?: 'waiting' | 'at_refill' | 'ready' | 'issued';
+}
+
+export interface RefillBatchItem {
+  kind: 'cartridge' | 'printer';
+  id: string;
+  printerInventoryNumber: string;
+  repairId?: string;
 }
 
 export interface RefillBatch {
   id: string;
   date: string;
   cartridgeIds: string[];
+  items?: RefillBatchItem[];
   status: 'sent' | 'received';
   company?: string;
   notes?: string;
@@ -98,7 +120,20 @@ export interface RefillLogEntry {
   date: string;
   cartridgeId: string;
   cartridgeModel: string;
-  consumableType: ConsumableType;
+  consumableType: ConsumableType | 'device';
+  deviceType?: string;
+  serviceType?:
+    | 'refill'
+    | 'repair'
+    | 'replacement'
+    | 'writeoff'
+    | 'system'
+    | 'accept'
+    | 'shipment'
+    | 'receive'
+    | 'issue'
+    | 'delete'
+    | 'cancel';
   printerInventoryNumber: string;
   printerModel: string;
   department?: string;
@@ -155,6 +190,8 @@ export interface AppSettings {
   barcodeKey: 'id' | 'inv';
   /** Show technical/system log tabs in journal */
   showTechLogs: boolean;
+  /** Enable destructive event editing/cancel actions in UI */
+  enableEventEditing: boolean;
   /** Printers tab view mode */
   printersViewMode: 'list' | 'cards';
   /** How to send label data to printer. raw = WinSpool RAW API, driver = Windows print command fallback. */
@@ -169,9 +206,10 @@ DENSITY 10
 SPEED 4
 DIRECTION 0,0
 REFERENCE 0,0
-BARCODE 41,13,"128",36,0,0,2,2,"{id}"
-TEXT 101,60,"1",0,1,1,"{id}"
-TEXT 101,85,"2",0,1,1,"{inv}"
+BARCODE 15,41,"128",36,0,0,2,2,"{id}"
+TEXT 16,89,"3",0,1,1,"{id}"
+TEXT 16,16,"1",0,2,2,"{inv}"
+TEXT 154,89,"3",0,1,1,"{department}"
 PRINT 1,1
 CLS
 INITIALPRINTER`;
@@ -191,48 +229,58 @@ export const DEFAULT_SETTINGS: AppSettings = {
   labelRotation: 0,
   barcodeKey: 'id',
   showTechLogs: false,
+  enableEventEditing: false,
   printersViewMode: 'list',
   labelPrintMode: 'driver',
 };
 
 export const DEFAULT_LABEL_TEMPLATE: LabelTemplate = {
-  width: 45,
-  height: 25,
+  width: 43,
+  height: 15,
   elements: [
     {
       id: 'bc1',
       type: 'barcode',
-      x: 4,
-      y: 4,
-      width: 300,
-      height: 80,
+      x: 15,
+      y: 41,
+      width: 220,
+      height: 36,
       content: '{id}',
       barcodeType: '128',
-      barcodeHeight: 80,
+      barcodeHeight: 36,
     },
     {
       id: 'txt1',
       type: 'text',
-      x: 4,
-      y: 92,
-      width: 300,
-      height: 24,
+      x: 16,
+      y: 89,
+      width: 110,
+      height: 16,
       content: '{id}',
-      fontSize: 2,
       fontScale: 1,
-      textTag: '2',
+      textTag: '3',
     },
     {
       id: 'txt2',
       type: 'text',
-      x: 4,
-      y: 116,
-      width: 300,
+      x: 16,
+      y: 16,
+      width: 130,
       height: 24,
       content: '{inv}',
-      fontSize: 2,
+      fontScale: 2,
+      textTag: '1',
+    },
+    {
+      id: 'txt3',
+      type: 'text',
+      x: 154,
+      y: 89,
+      width: 150,
+      height: 16,
+      content: '{department}',
       fontScale: 1,
-      textTag: '2',
+      textTag: '3',
     },
   ],
 };
@@ -261,6 +309,7 @@ declare global {
       loadDatabase: () => Promise<{ success: boolean; data: unknown | null; path: string; error?: string }>;
       saveDatabase: (data: unknown) => Promise<{ success: boolean; path: string; error?: string }>;
       getDataFolder: () => Promise<string>;
+      exportJsonBackup: (data: unknown) => Promise<{ success: boolean; path?: string | null; error?: string }>;
     };
   }
 }
