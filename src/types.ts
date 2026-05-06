@@ -115,6 +115,21 @@ export interface RefillBatch {
   notes?: string;
 }
 
+/** Human-readable service category stored on each log entry. Russian strings map directly to UI tab names. */
+export type LogServiceType =
+  // === User-facing (is_technical: false) ===
+  | 'Заправка'       // Cartridge/device refill cycle: accept → ship → receive
+  | 'Выдача'         // Issue to end user
+  | 'Ремонт'         // Printer repair cycle: accept → ship → receive → issue
+  // === Technical (is_technical: true) ===
+  | 'Создание'       // Adding a new record (printer, cartridge, import)
+  | 'Редактирование' // Editing an existing record
+  | 'Списание'       // Writeoff or deletion
+  | 'Системное'      // System events: employees, firmware, etc.
+  // === Legacy values (kept for backward compatibility with existing DB data) ===
+  | 'refill' | 'repair' | 'replacement' | 'writeoff' | 'system'
+  | 'accept' | 'shipment' | 'receive' | 'issue' | 'delete' | 'cancel';
+
 export interface RefillLogEntry {
   id: string;
   date: string;
@@ -122,23 +137,14 @@ export interface RefillLogEntry {
   cartridgeModel: string;
   consumableType: ConsumableType | 'device';
   deviceType?: string;
-  serviceType?:
-    | 'refill'
-    | 'repair'
-    | 'replacement'
-    | 'writeoff'
-    | 'system'
-    | 'accept'
-    | 'shipment'
-    | 'receive'
-    | 'issue'
-    | 'delete'
-    | 'cancel';
+  serviceType?: LogServiceType;
   printerInventoryNumber: string;
   printerModel: string;
   department?: string;
   employee?: string;
   action: string;
+  /** true = technical/system record hidden from user by default; false/undefined = user-facing business event */
+  is_technical?: boolean;
 }
 
 export interface EmployeeRecord {

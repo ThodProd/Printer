@@ -91,10 +91,39 @@ function findCartridgeHandoutName(c: Cartridge, refillLog: RefillLogEntry[]): st
       e =>
         e.cartridgeId === c.id &&
         e.consumableType !== 'device' &&
-        (e.serviceType === 'issue' || /\bВыдан\b/i.test(e.action)),
+        (e.serviceType === 'issue' || e.serviceType === 'Выдача' || /\bВыдан\b/i.test(e.action)),
     );
   if (fromLog?.employee?.trim()) return fromLog.employee.trim();
   return undefined;
+}
+
+/** Кто забрал устройство — только фактическая выдача. По дате: в журнале смешаны prepend/append, порядок массива ненадёжен. */
+function findDeviceHandoutName(
+  printerInventoryNumber: string,
+  programId: string | undefined,
+  refillLog: RefillLogEntry[],
+): string | undefined {
+  const matches = refillLog.filter(e => {
+    if (e.consumableType !== 'device') return false;
+    const a = (e.action ?? '').toLowerCase();
+    if (!a.includes('выдан')) return false;
+    if (e.printerInventoryNumber === printerInventoryNumber) return true;
+    if (programId && e.cartridgeId === programId) return true;
+    return false;
+  });
+  if (matches.length === 0) return undefined;
+  matches.sort((x, y) => new Date(y.date).getTime() - new Date(x.date).getTime());
+  return matches[0]?.employee?.trim() || undefined;
+}
+
+/** Подпись к отправке — в UI в скобках после ФИО: «Иванов (расшифровка подписи)». */
+function batchSenderDisplay(batch: Pick<RefillBatch, 'company' | 'notes'>): string | null {
+  const c = batch.company?.trim();
+  const n = batch.notes?.trim();
+  if (c && n) return `${c} (${n})`;
+  if (c) return c;
+  if (n) return `(${n})`;
+  return null;
 }
 
 function getBatchItems(batch: RefillBatch): RefillBatchItem[] {
@@ -418,15 +447,16 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
           cartridgeId: c.id,
           cartridgeModel: c.model,
           consumableType: c.consumableType ?? 'cartridge',
-          deviceType: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'shipment',
+          deviceType: c.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Заправка',
           printerInventoryNumber: c.printerInventoryNumber,
           printerModel: printer?.model ?? '',
           department: printer?.department ?? '',
           employee: employee || undefined,
           action: employee
-            ? `Отправлен на заправку (${employee}). Партия ${batchId}`
-            : `Отправлен на заправку. Партия ${batchId}`,
+            ? `Картридж отправлен на заправку (${employee}). Партия ${batchId}`
+            : `Картридж отправлен на заправку. Партия ${batchId}`,
+          is_technical: false,
         });
       });
     }
@@ -435,7 +465,6 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
       const printer = store.printers.find(p => p.inventoryNumber === r.printerInventoryNumber);
       store.updateRepair(r.id, {
         status: 'in_repair',
-        technician: employee || undefined,
         locationStatus: 'at_refill',
       });
       store.addRefillLog({
@@ -445,12 +474,15 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
         cartridgeModel: printer?.model ?? 'Устройство',
         consumableType: 'device',
         deviceType: printer?.printerType ?? 'Устройство',
-        serviceType: 'shipment',
+        serviceType: 'Ремонт',
         printerInventoryNumber: r.printerInventoryNumber,
         printerModel: printer?.model ?? '',
         department: printer?.department ?? '',
         employee: employee || undefined,
-        action: employee ? `Отправлен в ремонт (${employee}). Партия ${batchId}` : `Отправлен в ремонт. Партия ${batchId}`,
+        action: employee
+          ? `Принтер отправлен в ремонт (${employee}). Партия ${batchId}`
+          : `Принтер отправлен в ремонт. Партия ${batchId}`,
+        is_technical: false,
       });
     });
     setSelectedWaiting(new Set());
@@ -488,11 +520,13 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
           cartridgeModel: printer?.model ?? 'Устройство',
           consumableType: 'device',
           deviceType: printer?.printerType ?? 'Устройство',
-          serviceType: 'receive',
+          serviceType: 'Ремонт',
           printerInventoryNumber: item.printerInventoryNumber,
           printerModel: printer?.model ?? '',
           department: printer?.department ?? '',
-          action: `Принят с заправки (устройство). Партия ${batchId}`,
+          employee: printer?.boss,
+          action: `Принтер получен с ремонта. Партия ${batchId}`,
+          is_technical: false,
         });
         return;
       }
@@ -507,12 +541,14 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
           cartridgeId: cartridge.id,
           cartridgeModel: cartridge.model,
           consumableType: cartridge.consumableType ?? 'cartridge',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'receive',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Заправка',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
           department: printer?.department ?? '',
-          action: `Получен с заправки. Партия ${batchId}`,
+          employee: printer?.boss,
+          action: `Картридж получен с заправки. Партия ${batchId}`,
+          is_technical: false,
         });
       }
     });
@@ -567,12 +603,14 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
       cartridgeId: newId,
       cartridgeModel: newCart.model,
       consumableType: newCart.consumableType ?? 'cartridge',
-      deviceType: newCart.consumableType === 'drum' ? 'Драм' : 'Картридж',
-      serviceType: 'refill',
+      deviceType: newCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+      serviceType: 'Редактирование',
       printerInventoryNumber: newCart.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
-      action: `Заменен на новый (старый ID: ${cartridge.id}). Партия ${batchId}`,
+      employee: printer?.boss,
+      action: `Расходник заменён на новый (старый ID: ${cartridge.id}). Партия ${batchId}`,
+      is_technical: true,
     });
   };
 
@@ -583,9 +621,7 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   const openIssuePrinterModal = (item: RefillBatchItem, batchId = '') => {
-    const printer = store.printers.find(p => p.inventoryNumber === item.printerInventoryNumber);
-    const repair = item.repairId ? store.repairs.find(r => r.id === item.repairId) : undefined;
-    setIssueEmployee(repair?.technician ?? printer?.boss ?? '');
+    setIssueEmployee('');
     setIssueModal({ kind: 'printer', item, ...(batchId ? { batchId } : {}) });
   };
 
@@ -817,6 +853,7 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
           {filteredSentBatches.map(batch => {
             const carts = getBatchCartridges(batch);
             const expanded = expandedBatches.has(batch.id);
+            const batchSender = batchSenderDisplay(batch);
             return (
               <div key={batch.id} className="border border-blue-200 rounded-xl overflow-hidden">
                 <div className="flex justify-between items-center px-4 py-3 bg-blue-50/50">
@@ -825,7 +862,7 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <div className="text-xs text-gray-500 flex items-center space-x-1 mt-0.5">
                       <Calendar size={12} />
                       <span>{new Date(batch.date).toLocaleDateString('ru-RU')}</span>
-                      {batch.company && <span>· отправил: {batch.company}</span>}
+                      {batchSender && <span>· отправил: {batchSender}</span>}
                     </div>
                     <div className="text-xs text-gray-500">
                       Позиции: {getBatchItems(batch).length} шт. (картриджи: {carts.length}, устройства: {getBatchItems(batch).filter(i => i.kind === 'printer').length})
@@ -1191,12 +1228,13 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
             {filteredReceivedBatches.slice().reverse().map(batch => {
               const expanded = expandedBatches.has(batch.id);
               const carts = getBatchCartridges(batch);
+              const batchSender = batchSenderDisplay(batch);
               return (
                 <div key={batch.id} className="text-sm">
                   <div className="px-5 py-3 flex justify-between items-center">
                     <div>
                       <span className="font-bold text-gray-700">{batch.id}</span>
-                      {batch.company && <span className="ml-2 text-gray-500 text-xs">отправил: {batch.company}</span>}
+                      {batchSender && <span className="ml-2 text-gray-500 text-xs">отправил: {batchSender}</span>}
                     </div>
                     <div className="flex items-center space-x-4 text-xs text-gray-400">
                       <span>{new Date(batch.date).toLocaleDateString('ru-RU')}</span>
@@ -1248,16 +1286,15 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
                           {getBatchPrinters(batch).map(item => {
                             const printer = getPrinter(item.printerInventoryNumber);
                             const repair = item.repairId ? store.repairs.find(r => r.id === item.repairId) : undefined;
-                            const deviceHandout = store.refillLog
-                              .slice()
-                              .reverse()
-                              .find(e => {
-                                if (e.consumableType !== 'device') return false;
-                                if (!(e.serviceType === 'issue' || /\bВыдан\b/i.test(e.action))) return false;
-                                if (e.printerInventoryNumber === item.printerInventoryNumber) return true;
-                                if (printer?.programId && e.cartridgeId === printer.programId) return true;
-                                return false;
-                              })?.employee?.trim();
+                            const deviceHandout = findDeviceHandoutName(
+                              item.printerInventoryNumber,
+                              printer?.programId,
+                              store.refillLog,
+                            );
+                            const whoCollectedDisplay =
+                              repair?.locationStatus === 'issued'
+                                ? (deviceHandout || '—')
+                                : (deviceHandout || 'На складе (готов к выдаче)');
                             return (
                               <React.Fragment key={`closed_group_${item.id}_${item.repairId ?? 'norepair'}`}>
                                 <tr className="border-t">
@@ -1274,7 +1311,7 @@ const InventoryTab: React.FC<{ store: StoreType }> = ({ store }) => {
                                       {repair?.locationStatus === 'issued' ? 'Выдан' : repair?.locationStatus === 'ready' ? 'Готов к выдаче' : 'В ремонте'}
                                     </span>
                                   </td>
-                                  <td className="px-2 py-1">{deviceHandout || '—'}</td>
+                                  <td className="px-2 py-1">{whoCollectedDisplay}</td>
                                 </tr>
                                 {carts.filter(c => c.linkedRepairId === item.repairId).map(c => {
                                   const handoutName = findCartridgeHandoutName(c, store.refillLog);

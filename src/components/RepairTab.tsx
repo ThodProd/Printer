@@ -333,11 +333,13 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                               cartridgeModel: printer?.model ?? 'Устройство',
                               consumableType: 'device',
                               deviceType: printer?.printerType ?? 'Устройство',
-                              serviceType: 'cancel',
+                              serviceType: 'Списание',
                               printerInventoryNumber: repair.printerInventoryNumber,
                               printerModel: printer?.model ?? '',
                               department: printer?.department ?? '',
-                              action: `Удалено событие ремонта: ${repair.reason}`,
+                              employee: printer?.boss,
+                              action: `Запись ремонта удалена: ${repair.reason}`,
+                              is_technical: true,
                             });
                           }}
                           className="px-2 py-1 border border-red-200 text-red-600 rounded text-xs hover:bg-red-50"

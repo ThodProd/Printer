@@ -281,6 +281,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       if (
         entry.serviceType === 'writeoff' ||
         entry.serviceType === 'replacement' ||
+        entry.serviceType === 'Списание' ||
+        entry.serviceType === 'Редактирование' && action.includes('замен') ||
         action.includes('списан') ||
         action.includes('замен')
       ) {
@@ -368,6 +370,30 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         : !!newPrinter.firmwareFlashed,
     };
     const isNew = !editPrinter;
+    if (!isNew && editPrinter) {
+      const changes: string[] = [];
+      if (editPrinter.model !== printer.model) changes.push(`модель: ${editPrinter.model} → ${printer.model}`);
+      if (editPrinter.department !== printer.department) changes.push(`подразделение: ${editPrinter.department || '—'} → ${printer.department || '—'}`);
+      if (editPrinter.boss !== printer.boss) changes.push(`мат.отв.: ${editPrinter.boss || '—'} → ${printer.boss || '—'}`);
+      if (editPrinter.balanceCost !== printer.balanceCost) changes.push(`стоимость: ${editPrinter.balanceCost || '—'} → ${printer.balanceCost || '—'}`);
+      if (changes.length > 0) {
+        store.addRefillLog({
+          id: Math.random().toString(36).substr(2, 9),
+          date: new Date().toISOString(),
+          cartridgeId: printer.programId ?? printer.inventoryNumber,
+          cartridgeModel: printer.model,
+          consumableType: 'device',
+          deviceType: printer.printerType,
+          serviceType: 'Редактирование',
+          printerInventoryNumber: printer.inventoryNumber,
+          printerModel: printer.model,
+          department: printer.department,
+          employee: printer.boss,
+          action: `Принтер отредактирован: ${changes.join('; ')}`,
+          is_technical: true,
+        });
+      }
+    }
     store.addPrinter(printer);
 
     if (isNew) {
@@ -480,7 +506,26 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       return;
     }
     if (!editCartridgeId) return;
+    const prevCart = store.cartridges.find(c => c.id === editCartridgeId);
     store.updateCartridge(editCartridgeId, { model: editCartridgeModel, color: editCartridgeColor || undefined });
+    if (prevCart && prevCart.model !== editCartridgeModel) {
+      const printer = store.printers.find(p => p.inventoryNumber === prevCart.printerInventoryNumber);
+      store.addRefillLog({
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        cartridgeId: editCartridgeId,
+        cartridgeModel: editCartridgeModel,
+        consumableType: prevCart.consumableType ?? 'cartridge',
+        deviceType: prevCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        serviceType: 'Редактирование',
+        printerInventoryNumber: prevCart.printerInventoryNumber,
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        employee: printer?.boss,
+        action: `Расходник отредактирован: модель ${prevCart.model} → ${editCartridgeModel}`,
+        is_technical: true,
+      });
+    }
     setEditCartridgeId(null);
     setEditPin('');
     setEditCartridgeColor('');
@@ -528,12 +573,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         cartridgeId: c.id,
         cartridgeModel: modelTrim || c.model,
         consumableType: c.consumableType ?? 'cartridge',
-        deviceType: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
-        serviceType: 'writeoff',
+        deviceType: c.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        serviceType: 'Списание',
         printerInventoryNumber: c.printerInventoryNumber,
         printerModel: printer?.model ?? '',
         department: printer?.department ?? '',
-        action: 'Отмечен как списан в карточке принтера',
+        employee: printer?.boss,
+        action: 'Расходник отмечен как списан в карточке принтера',
+        is_technical: true,
       });
     } else if (!wantDisposed && c.status === 'disposed' && !c.isReplaced) {
       store.updateCartridgeStatus(c.id, 'on_hand', 'Снята отметка списания в карточке принтера');
@@ -542,8 +589,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
           e =>
             !(
               e.cartridgeId === c.id &&
-              e.serviceType === 'writeoff' &&
-              e.action === 'Отмечен как списан в карточке принтера'
+              (e.serviceType === 'writeoff' || e.serviceType === 'Списание') &&
+              e.action === 'Расходник отмечен как списан в карточке принтера'
             ),
         ),
       );
@@ -566,12 +613,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
           cartridgeId: cartridge.id,
           cartridgeModel: cartridge.model,
           consumableType: cartridge.consumableType ?? 'cartridge',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'refill',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Списание',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
           department: printer?.department ?? '',
-          action: 'Списан/удален из карточки принтера',
+          employee: printer?.boss,
+          action: 'Расходник списан и удалён из карточки принтера',
+          is_technical: true,
         });
         store.removeCartridge(cartridge.id);
         scheduleFocusPrintersSearch();
@@ -609,12 +658,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       cartridgeId: newId,
       cartridgeModel: newCart.model,
       consumableType: newCart.consumableType ?? 'cartridge',
-      deviceType: newCart.consumableType === 'drum' ? 'Драм' : 'Картридж',
-      serviceType: 'replacement',
+      deviceType: newCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+      serviceType: 'Редактирование',
       printerInventoryNumber: newCart.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
-      action: `Заменен на новый (старый ID: ${editCartridgeId})`,
+      employee: printer?.boss,
+      action: `Расходник заменён на новый (старый ID: ${editCartridgeId})`,
+      is_technical: true,
     });
     setEditCartridgeId(newId);
     setEditCartridgeModel(newCart.model);

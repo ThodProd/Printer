@@ -106,11 +106,15 @@ function stripLastMatchingRefillLog(
 /** Строка журнала о приёме в очередь «ожидает отправки» — убирается при отмене из списка на складе. */
 function isRefillLogWaitingAcceptEntry(e: RefillLogEntry): boolean {
   const a = e.action;
-  if (e.serviceType != null && e.serviceType !== 'accept') return false;
+  // Only 'accept' or 'Заправка' service types can be waiting accept entries
+  if (e.serviceType != null && e.serviceType !== 'accept' && e.serviceType !== 'Заправка' && e.serviceType !== 'Ремонт') return false;
   return (
     a === 'Принят на склад (сдан на заправку)' ||
     a === 'Принят на склад (вместе с принтером)' ||
     a === 'Зарегистрирован. Принят на склад ожидания.' ||
+    a === 'Картридж принят на заправку' ||
+    a === 'Картридж принят на заправку вместе с принтером' ||
+    a === 'Принтер принят в ремонт' ||
     (e.consumableType === 'device' && a.includes('Принят на склад') && a.includes('ожидание'))
   );
 }
@@ -455,7 +459,7 @@ export const useStore = () => {
 
   useDebouncedDatabase(database, hydrated);
 
-  const addPrinter = (printer: Printer) => {
+  const addPrinter = (printer: Printer, logAction?: string) => {
     const inventoryNumber = normalizeInventoryNumber(printer.inventoryNumber);
     const withProgramId: Printer = {
       ...printer,
@@ -473,12 +477,13 @@ export const useStore = () => {
       cartridgeModel: withProgramId.model,
       consumableType: 'device',
       deviceType: withProgramId.printerType,
-      serviceType: 'system',
+      serviceType: 'Создание',
       printerInventoryNumber: withProgramId.inventoryNumber,
       printerModel: withProgramId.model,
       department: withProgramId.department,
       employee: withProgramId.boss,
-      action: 'Добавлен принтер',
+      action: logAction ?? 'Принтер добавлен в систему',
+      is_technical: true,
     }]);
   };
 
@@ -493,12 +498,13 @@ export const useStore = () => {
           cartridgeModel: printer.model,
           consumableType: 'device',
           deviceType: printer.printerType,
-          serviceType: 'writeoff',
+          serviceType: 'Списание',
           printerInventoryNumber: printer.inventoryNumber,
           printerModel: printer.model,
           department: printer.department,
           employee: printer.boss,
-          action: 'Устройство удалено/списано',
+          action: 'Принтер удалён из системы',
+          is_technical: true,
         },
         ...prev,
       ]);
@@ -509,18 +515,21 @@ export const useStore = () => {
   const addCartridge = (cartridge: Cartridge) => {
     setCartridges(prev => [...prev, cartridge]);
     const printer = printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+    const typeLabel = cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж';
     setRefillLog(prev => [...prev, {
       id: Math.random().toString(36).substr(2, 9),
       date: new Date().toISOString(),
       cartridgeId: cartridge.id,
       cartridgeModel: cartridge.model,
       consumableType: cartridge.consumableType ?? 'cartridge',
-      deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-      serviceType: 'system',
+      deviceType: typeLabel,
+      serviceType: 'Создание',
       printerInventoryNumber: cartridge.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
-      action: 'Добавлен расходник',
+      employee: printer?.boss,
+      action: `Добавлен расходник: ${typeLabel} ${cartridge.model}`,
+      is_technical: true,
     }]);
   };
 
@@ -528,6 +537,7 @@ export const useStore = () => {
     const cartridge = cartridges.find(c => c.id === id);
     if (cartridge) {
       const printer = printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+      const typeLabel = cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж';
       setRefillLog(prev => [
         {
           id: Math.random().toString(36).substr(2, 9),
@@ -535,12 +545,14 @@ export const useStore = () => {
           cartridgeId: cartridge.id,
           cartridgeModel: cartridge.model,
           consumableType: cartridge.consumableType ?? 'cartridge',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'writeoff',
+          deviceType: typeLabel,
+          serviceType: 'Списание',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
           department: printer?.department ?? '',
-          action: 'Картридж удален/списан',
+          employee: printer?.boss,
+          action: `Расходник удалён из системы: ${typeLabel} ${cartridge.model}`,
+          is_technical: true,
         },
         ...prev,
       ]);
@@ -698,6 +710,7 @@ export const useStore = () => {
       }),
     );
 
+    const typeLabel = cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж';
     const logs: RefillLogEntry[] = [];
     if (hadAtRefill) {
       logs.push({
@@ -706,12 +719,14 @@ export const useStore = () => {
         cartridgeId: cartridge.id,
         cartridgeModel: cartridge.model,
         consumableType: cartridge.consumableType ?? 'cartridge',
-        deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-        serviceType: 'receive',
+        deviceType: typeLabel,
+        serviceType: 'Заправка',
         printerInventoryNumber: cartridge.printerInventoryNumber,
         printerModel: printer?.model ?? '',
         department: printer?.department ?? '',
-        action: `Получен с заправки. Партия ${batchId}`,
+        employee: printer?.boss,
+        action: `Картридж получен с заправки. Партия ${batchId}`,
+        is_technical: false,
       });
     }
     logs.push({
@@ -720,13 +735,14 @@ export const useStore = () => {
       cartridgeId: cartridge.id,
       cartridgeModel: cartridge.model,
       consumableType: cartridge.consumableType ?? 'cartridge',
-      deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-      serviceType: 'issue',
+      deviceType: typeLabel,
+      serviceType: 'Выдача',
       printerInventoryNumber: cartridge.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
       employee,
-      action: 'Выдан пользователю',
+      action: employee ? `Картридж выдан сотруднику ${employee}` : 'Картридж выдан пользователю',
+      is_technical: false,
     });
     setRefillLog(prev => [...logs, ...prev]);
 
@@ -808,13 +824,12 @@ export const useStore = () => {
             comment: 'Выдан вместе с принтером',
             employee,
           });
-          const trimmed = employee?.trim();
           return {
             ...c,
             status: 'on_hand',
             refillCount,
             history: hist,
-            lastSubmittedBy: trimmed ? trimmed : c.lastSubmittedBy,
+            lastSubmittedBy: c.lastSubmittedBy,
           };
         }
         return c;
@@ -840,11 +855,13 @@ export const useStore = () => {
         cartridgeModel: printer.model,
         consumableType: 'device',
         deviceType: printer.printerType ?? 'Устройство',
-        serviceType: 'receive',
+        serviceType: 'Ремонт',
         printerInventoryNumber,
         printerModel: printer.model,
         department: printer.department ?? '',
-        action: `Принят с заправки (устройство). Партия ${batchId}`,
+        employee: printer.boss,
+        action: `Принтер получен с ремонта. Партия ${batchId}`,
+        is_technical: false,
       });
     }
     logs.push({
@@ -854,12 +871,13 @@ export const useStore = () => {
       cartridgeModel: printer.model,
       consumableType: 'device',
       deviceType: printer.printerType ?? 'Устройство',
-      serviceType: 'issue',
+      serviceType: 'Ремонт',
       printerInventoryNumber,
       printerModel: printer.model,
       department: printer.department ?? '',
       employee,
-      action: 'Выдан пользователю (устройство, сканер)',
+      action: employee ? `Принтер выдан сотруднику ${employee}` : 'Принтер выдан пользователю',
+      is_technical: false,
     });
     setRefillLog(prev => [...logs, ...prev]);
   };
@@ -908,21 +926,59 @@ export const useStore = () => {
       cartridgeModel: printer?.model ?? '',
       consumableType: 'device',
       deviceType: printer?.printerType ?? 'Устройство',
-      serviceType: 'repair',
+      serviceType: 'Ремонт',
       printerInventoryNumber: repair.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
       employee: repair.technician,
-      action: `Принят в ремонт: ${repair.reason}`,
+      action: `Принтер принят в ремонт: ${repair.reason}`,
+      is_technical: false,
     }]);
   };
 
   const addEmployee = (record: EmployeeRecord) => {
     setEmployees(prev => [...prev, record]);
+    const printer = printers.find(p => p.inventoryNumber === record.printerInventoryNumber);
+    const empAddCartId: string = printer?.programId ?? printer?.inventoryNumber ?? record.printerInventoryNumber ?? '';
+    setRefillLog(prev => [...prev, {
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: empAddCartId,
+      cartridgeModel: printer?.model ?? '',
+      consumableType: 'device',
+      deviceType: printer?.printerType ?? 'Устройство',
+      serviceType: 'Системное',
+      printerInventoryNumber: record.printerInventoryNumber ?? '',
+      printerModel: printer?.model ?? '',
+      department: printer?.department ?? '',
+      employee: record.name,
+      action: `Добавлен сотрудник: ${record.name}`,
+      is_technical: true,
+    }]);
   };
 
   const removeEmployee = (id: string) => {
+    const record = employees.find(e => e.id === id);
     setEmployees(prev => prev.filter(e => e.id !== id));
+    if (record) {
+      const printer = printers.find(p => p.inventoryNumber === record.printerInventoryNumber);
+      const empRemCartId: string = printer?.programId ?? printer?.inventoryNumber ?? record.printerInventoryNumber ?? '';
+      setRefillLog(prev => [...prev, {
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        cartridgeId: empRemCartId,
+        cartridgeModel: printer?.model ?? '',
+        consumableType: 'device',
+        deviceType: printer?.printerType ?? 'Устройство',
+        serviceType: 'Системное',
+        printerInventoryNumber: record.printerInventoryNumber ?? '',
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        employee: record.name,
+        action: `Удалён сотрудник: ${record.name}`,
+        is_technical: true,
+      }]);
+    }
   };
 
   const addRefillLog = (entry: RefillLogEntry) => {

@@ -151,12 +151,13 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
             cartridgeModel: scannedPrinter.model,
             consumableType: 'device',
             deviceType: scannedPrinter.printerType,
-            serviceType: 'receive',
+            serviceType: 'Ремонт',
             printerInventoryNumber: scannedPrinter.inventoryNumber,
             printerModel: scannedPrinter.model,
             department: scannedPrinter.department ?? '',
             employee: scannedPrinter.boss || undefined,
-            action: 'Принят с заправки (устройство, сканер)',
+            action: 'Принтер получен с ремонта (сканер)',
+            is_technical: false,
           });
           setMessage({ text: `✓ Устройство готово к выдаче: ${scannedPrinter.inventoryNumber}`, type: 'success' });
           addOp(`Готово к выдаче: ${scannedPrinter.inventoryNumber}`, true);
@@ -226,12 +227,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         cartridgeId: cartridge.id,
         cartridgeModel: cartridge.model,
         consumableType: cartridge.consumableType ?? 'cartridge',
-        deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-        serviceType: 'refill',
+        deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        serviceType: 'Заправка',
         printerInventoryNumber: cartridge.printerInventoryNumber,
         printerModel: fastPrinter?.model ?? '',
         department: fastPrinter?.department ?? '',
-        action: 'Принят с заправки (быстрый режим)',
+        employee: fastPrinter?.boss,
+        action: 'Картридж получен с заправки (быстрый режим)',
+        is_technical: false,
       });
       setMessage({ text: `✓ Принят с заправки: ${cartridge.id}`, type: 'success' });
       addOp(`Получен с заправки: ${cartridge.id}`, true);
@@ -277,7 +280,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           }
         }
 
-        // Log refill action
         const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
         store.addRefillLog({
           id: Math.random().toString(36).substr(2, 9),
@@ -287,11 +289,12 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'accept',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Заправка',
           department: printer?.department ?? '',
           employee,
-          action: 'Принят на склад (сдан на заправку)',
+          action: 'Картридж принят на заправку',
+          is_technical: false,
         });
 
         setMessage({ text: `✓ Принят на склад: ${cartridge.id}`, type: 'success' });
@@ -313,10 +316,12 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'receive',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Заправка',
           department: printer?.department ?? '',
-          action: 'Принят с заправки',
+          employee: printer?.boss,
+          action: 'Картридж получен с заправки',
+          is_technical: false,
         });
         setMessage({ text: `✓ Принят с заправки: ${cartridge.id}`, type: 'success' });
         addOp(`Получен с заправки: ${cartridge.id}`, true);
@@ -347,11 +352,12 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           consumableType: cartridge.consumableType ?? 'cartridge',
           printerInventoryNumber: cartridge.printerInventoryNumber,
           printerModel: printer?.model ?? '',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-          serviceType: 'issue',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+          serviceType: 'Выдача',
           department: printer?.department ?? '',
           employee,
-          action: 'Выдан пользователю',
+          action: employee ? `Картридж выдан сотруднику ${employee}` : 'Картридж выдан пользователю',
+          is_technical: false,
         });
         setMessage({ text: `✓ Выдан: ${cartridge.id}`, type: 'success' });
         addOp(`Выдан: ${cartridge.id}${employee ? ` (${employee})` : ''}`, true);
@@ -396,20 +402,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       comment: 'Создано по сканированию',
     };
     store.addRepair(repair);
-    store.addRefillLog({
-      id: Math.random().toString(36).substr(2, 9),
-      date: new Date().toISOString(),
-      cartridgeId: printerIntake.printer.programId ?? printerIntake.printer.inventoryNumber,
-      cartridgeModel: printerIntake.printer.model,
-      consumableType: 'device',
-      deviceType: printerIntake.printer.printerType,
-      serviceType: 'accept',
-      printerInventoryNumber: printerIntake.printer.inventoryNumber,
-      printerModel: printerIntake.printer.model,
-      department: printerIntake.printer.department ?? '',
-      employee: printerIntake.technician.trim() || undefined,
-      action: 'Принят на склад (устройство, ожидание отправки)',
-    });
 
     if (printerIntake.includeCartridges) {
       store.cartridges
@@ -431,13 +423,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
               cartridgeId: c.id,
               cartridgeModel: c.model,
               consumableType: c.consumableType ?? 'cartridge',
-              deviceType: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
-              serviceType: 'accept',
+              deviceType: c.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+              serviceType: 'Заправка',
               printerInventoryNumber: c.printerInventoryNumber,
               printerModel: printer?.model ?? '',
               department: printer?.department ?? '',
               employee: printerIntake.technician.trim() || undefined,
-              action: 'Принят на склад (вместе с принтером)',
+              action: 'Картридж принят на заправку вместе с принтером',
+              is_technical: false,
             });
           }
         });
@@ -464,12 +457,13 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       cartridgeModel: printerReturn.printer.model,
       consumableType: 'device',
       deviceType: printerReturn.printer.printerType,
-      serviceType: 'issue',
+      serviceType: 'Ремонт',
       printerInventoryNumber: printerReturn.printer.inventoryNumber,
       printerModel: printerReturn.printer.model,
       department: printerReturn.printer.department ?? '',
       employee,
-      action: 'Выдан пользователю (устройство, сканер)',
+      action: employee ? `Принтер выдан сотруднику ${employee}` : 'Принтер выдан пользователю',
+      is_technical: false,
     });
     setMessage({ text: `✓ Выдан принтер: ${printerReturn.printer.inventoryNumber}`, type: 'success' });
     addOp(`Выдан принтер: ${printerReturn.printer.inventoryNumber}`, true);
@@ -526,6 +520,23 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
     };
 
     store.addCartridge(cartridge);
+
+    // Log user-facing acceptance event (the creation log is technical; this is the business event)
+    store.addRefillLog({
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
+      cartridgeId: cartridge.id,
+      cartridgeModel: cartridge.model,
+      consumableType: 'cartridge',
+      deviceType: 'Картридж',
+      serviceType: 'Заправка',
+      printerInventoryNumber: cartridge.printerInventoryNumber,
+      printerModel: printerExists?.model ?? '',
+      department: newForm.department || printerExists?.department || '',
+      employee: newForm.boss || printerExists?.boss || undefined,
+      action: 'Картридж принят на заправку (новая регистрация)',
+      is_technical: false,
+    });
 
     // Auto print if enabled
     if (store.settings.autoPrintOnRegister && store.settings.labelPrinterName && window.electronAPI) {

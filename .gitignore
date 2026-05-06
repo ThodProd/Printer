@@ -9,3 +9,6 @@ release-*/
 .DS_Store
 Thumbs.db
 *.local
+sign-env.local
+*.pfx
+*.p12
