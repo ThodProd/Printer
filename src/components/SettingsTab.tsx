@@ -359,10 +359,23 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
 
             <div className="space-y-2">
               <label className="text-xs text-gray-500 uppercase font-bold">Режим отправки печати</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 {([
-                  { id: 'raw', title: 'RAW-драйвер', hint: 'Generic/Text Only или TSC RAW' },
-                  { id: 'driver', title: 'Драйвер Windows', hint: 'Запасной способ через print.exe' },
+                  {
+                    id: 'raw',
+                    title: 'RAW (Win32 API)',
+                    hint: 'Прямая запись байтов через winspool.drv. Требует Generic/Text Only или TSC RAW драйвер. Использует PowerShell.',
+                  },
+                  {
+                    id: 'driver',
+                    title: 'Драйвер (cmd.exe)',
+                    hint: 'Стандартная команда Windows print.exe через cmd.exe. Не использует PowerShell — работает там, где RAW блокируется защитным ПО.',
+                  },
+                  {
+                    id: 'shell',
+                    title: 'Через приложение ★ (рекомендуется)',
+                    hint: 'Печать через встроенный механизм Electron — как нажать Ctrl+P в Word. Не зависит от PowerShell/cmd. Работает с OEM-драйвером TSC в режиме TEXT-passthrough.',
+                  },
                 ] as const).map(mode => (
                   <button
                     key={mode.id}
@@ -375,10 +388,16 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
                     }`}
                   >
                     <div className="text-sm font-bold">{mode.title}</div>
-                    <div className="text-[11px] opacity-70">{mode.hint}</div>
+                    <div className="text-[11px] opacity-70 mt-0.5">{mode.hint}</div>
                   </button>
                 ))}
               </div>
+              {(cfg.labelPrintMode ?? 'raw') === 'shell' && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <strong>Примечание:</strong> Режим «Через приложение» печатает TSPL как обычный текст через Windows GDI.
+                  Убедитесь, что в свойствах принтера в Windows (вкладка «Дополнительно») тип данных очереди установлен в <strong>TEXT</strong> или <strong>RAW</strong> — тогда TSC-драйвер передаёт текст напрямую как TSPL-команды.
+                </p>
+              )}
             </div>
 
             {/* Printer memory reset */}

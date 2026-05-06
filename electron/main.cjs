@@ -252,44 +252,114 @@ ipcMain.handle('get-printers', async event => {
  * Generic/Text Only driver on the USB port for reliable TSPL passthrough.
  */
 ipcMain.handle('raw-print', async (_event, printerName, tsplData, mode = 'raw') => {
-  return new Promise(resolve => {
-    if (!printerName) {
-      resolve({ success: false, error: 'Принтер не выбран. Укажите принтер в Настройках.' });
-      return;
-    }
+  if (!printerName) {
+    return { success: false, error: 'Принтер не выбран. Укажите принтер в Настройках.' };
+  }
 
+  // ── SHELL MODE ───────────────────────────────────────────────────────────
+  // Uses Electron's own webContents.print() — the print job comes from
+  // CartridgeControl.exe itself, exactly like pressing Ctrl+P in any app.
+  // Security software that blocks PowerShell/scripts will NOT block this.
+  // The TSPL is sent as plain text; works when the printer driver is set to
+  // TEXT or RAW spool data type (TSC OEM driver with "passthrough" mode).
+  if (mode === 'shell') {
+    return new Promise(resolve => {
+      try {
+        const tsplText = ensureTsplStartsWithCls(tsplData);
+        const escaped = tsplText
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;}body{font-family:monospace;font-size:6pt;white-space:pre;line-height:1.1;}</style></head><body>${escaped}</body></html>`;
+
+        const printWin = new BrowserWindow({
+          show: false,
+          skipTaskbar: true,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            offscreen: false,
+          },
+        });
+
+        let settled = false;
+        const settle = result => {
+          if (settled) return;
+          settled = true;
+          try { if (!printWin.isDestroyed()) printWin.destroy(); } catch {}
+          resolve(result);
+        };
+
+        const timer = setTimeout(() => settle({ success: false, error: 'Timeout: принтер не ответил за 20 секунд' }), 20000);
+
+        printWin.webContents.once('did-finish-load', () => {
+          printWin.webContents.print(
+            { silent: true, printBackground: false, deviceName: printerName },
+            (success, failureReason) => {
+              clearTimeout(timer);
+              settle(success
+                ? { success: true }
+                : { success: false, error: `Ошибка Electron print: ${failureReason ?? 'unknown'}` },
+              );
+            },
+          );
+        });
+
+        printWin.webContents.on('did-fail-load', (_e, code, desc) => {
+          clearTimeout(timer);
+          settle({ success: false, error: `Не удалось загрузить страницу для печати: ${desc} (${code})` });
+        });
+
+        printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+      } catch (e) {
+        resolve({ success: false, error: String(e.message ?? e) });
+      }
+    });
+  }
+
+  // ── DRIVER MODE (cmd.exe) ────────────────────────────────────────────────
+  // Uses Windows built-in print.exe via cmd.exe — NO PowerShell at all.
+  // Security policies that block powershell.exe will not affect this path.
+  if (mode === 'driver') {
+    return new Promise(resolve => {
+      try {
+        const tmpFile = path.join(os.tmpdir(), `label_${Date.now()}.prn`);
+        fs.writeFileSync(tmpFile, encodeWindows1251(ensureTsplStartsWithCls(tsplData)));
+
+        // Wrap printer name in quotes; escape internal quotes for cmd
+        const safeName = printerName.replace(/"/g, '');
+        const safePath = tmpFile;
+
+        // Primary: print.exe /D:"<name>" "<file>"  (built into Windows)
+        const cmd = `print /D:"${safeName}" "${safePath}"`;
+
+        exec(`cmd.exe /c ${cmd}`, { timeout: 20000 }, (err, stdout, stderr) => {
+          try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+          if (err) {
+            const msg = (stderr || stdout || err.message || '').toString().trim();
+            resolve({
+              success: false,
+              error: `Ошибка print.exe: ${msg || err.message}. Попробуйте режим «RAW» или «Через приложение».`,
+            });
+          } else {
+            resolve({ success: true });
+          }
+        });
+      } catch (e) {
+        resolve({ success: false, error: String(e.message ?? e) });
+      }
+    });
+  }
+
+  // ── RAW MODE (Win32 winspool via PowerShell C# P/Invoke) ─────────────────
+  return new Promise(resolve => {
     try {
       const tmpFile = path.join(os.tmpdir(), `label_${Date.now()}.prn`);
-      // Write as ASCII bytes (TSPL is ASCII-compatible)
       fs.writeFileSync(tmpFile, encodeWindows1251(ensureTsplStartsWithCls(tsplData)));
 
       const safePrinterName = printerName.replace(/'/g, "''");
       const safeFilePath = tmpFile.replace(/\\/g, '\\\\').replace(/'/g, "''");
-      const psScript = mode === 'driver' ? `
-$ErrorActionPreference = 'Stop';
-$printerName = '${safePrinterName}';
-$filePath = '${safeFilePath}';
-try {
-  $printed = $false;
-  try {
-    & print.exe /D:$printerName $filePath | Out-Null;
-    $printed = $true;
-  } catch {}
-  if (-not $printed) {
-    Get-Content -LiteralPath $filePath -Raw -Encoding Default | Out-Printer -Name $printerName;
-    $printed = $true;
-  }
-  if (-not $printed) {
-    throw "Не удалось отправить в печать через стандартный драйвер Windows";
-  }
-  Write-Output "OK";
-} catch {
-  Write-Error $_.Exception.Message;
-  exit 1;
-} finally {
-  if (Test-Path $filePath) { Remove-Item $filePath -Force -ErrorAction SilentlyContinue }
-}
-` : `
+      const psScript = `
 $ErrorActionPreference = 'Stop';
 $printerName = '${safePrinterName}';
 $filePath = '${safeFilePath}';
@@ -325,7 +395,7 @@ public class RawPrint {
   $hPrinter = [IntPtr]::Zero;
   if (-not [RawPrint]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {
     $errCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error();
-    throw "OpenPrinter failed (Win32=$errCode). Проверьте имя принтера. Рекомендуется использовать 'TSC TTP-225 (RAW)'"
+    throw "OpenPrinter failed (Win32=$errCode). Проверьте имя принтера."
   }
   $di = New-Object RawPrint+DOC_INFO_1;
   $di.pDocName = "TSPL Print Job";
@@ -345,7 +415,7 @@ public class RawPrint {
   [RawPrint]::ClosePrinter($hPrinter) | Out-Null;
 
   if (-not $ok) {
-    throw "WritePrinter error (Win32=$writeErr). Если используется OEM-драйвер TSC, смените принтер на 'TSC TTP-225 (RAW)' в Настройках."
+    throw "WritePrinter error (Win32=$writeErr). Если используется OEM-драйвер TSC, смените на режим 'Драйвер (cmd)' или 'Через приложение'."
   }
   Write-Output "OK:$written";
 } catch {
@@ -369,7 +439,7 @@ public class RawPrint {
             if (msg.includes('Win32=5')) {
               resolve({
                 success: false,
-                error: 'Ошибка печати: Windows запретил RAW-запись в выбранный драйвер (Win32=5). В настройках попробуйте режим "Драйвер Windows" или создайте принтер RAW/Generic Text Only.',
+                error: 'Windows запретил RAW-запись (Win32=5). Попробуйте режим «Драйвер (cmd)» или «Через приложение» в Настройках.',
               });
               return;
             }

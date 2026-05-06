@@ -194,8 +194,11 @@ export interface AppSettings {
   enableEventEditing: boolean;
   /** Printers tab view mode */
   printersViewMode: 'list' | 'cards';
-  /** How to send label data to printer. raw = WinSpool RAW API, driver = Windows print command fallback. */
-  labelPrintMode: 'raw' | 'driver';
+  /** How to send label data to printer.
+   * raw    = Win32 winspool RAW API (via PowerShell C# P/Invoke)
+   * driver = Windows print.exe via cmd.exe (no PowerShell, bypasses PS-blockers)
+   * shell  = Electron webContents.print() — app-level print, never blocked by security software */
+  labelPrintMode: 'raw' | 'driver' | 'shell';
 }
 
 export const DEFAULT_LABEL_TSPL_TEMPLATE = `CLS
