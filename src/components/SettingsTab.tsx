@@ -11,6 +11,7 @@ import { AppSettings, DEFAULT_SETTINGS, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
 import { buildMemoryResetTSPL } from '../utils/tspl';
 import LabelEditorTab from './LabelEditorTab';
+import { ConfirmModal, AlertModal } from './ConfirmModal';
 
 async function sendTSPL(
   printerName: string,
@@ -66,6 +67,15 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
   const [driverStatus, setDriverStatus] = useState<{ text: string; ok: boolean } | null>(null);
   const [resettingMemory, setResettingMemory] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    message: string;
+    onConfirm: () => void;
+    dangerous?: boolean;
+  } | null>(null);
+  const [alertModal, setAlertModal] = useState<{
+    message: string;
+    variant?: 'info' | 'error' | 'success';
+  } | null>(null);
 
   const [scanTestInput, setScanTestInput] = useState('');
   const [lastScan, setLastScan] = useState('');
@@ -223,7 +233,7 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
     };
     if (window.electronAPI?.exportJsonBackup) {
       const res = await window.electronAPI.exportJsonBackup(payload);
-      if (!res.success) alert(`Ошибка экспорта JSON: ${res.error ?? 'неизвестно'}`);
+      if (!res.success) setAlertModal({ message: `Ошибка экспорта JSON: ${res.error ?? 'неизвестно'}`, variant: 'error' });
       return;
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
@@ -631,15 +641,24 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
               </button>
               <button
                 type="button"
-                onClick={async () => {
-                  if (!confirm('Очистить ВСЕ данные? Это необратимо!')) return;
-                  try {
-                    await store.wipeAllPersistedData();
-                    clearSavedUiHints();
-                    window.location.reload();
-                  } catch (e) {
-                    alert(e instanceof Error ? e.message : 'Не удалось очистить данные');
-                  }
+                onClick={() => {
+                  setConfirmModal({
+                    message: 'Очистить ВСЕ данные? Это необратимо!',
+                    dangerous: true,
+                    onConfirm: async () => {
+                      setConfirmModal(null);
+                      try {
+                        await store.wipeAllPersistedData();
+                        clearSavedUiHints();
+                        window.location.reload();
+                      } catch (e) {
+                        setAlertModal({
+                          message: e instanceof Error ? e.message : 'Не удалось очистить данные',
+                          variant: 'error',
+                        });
+                      }
+                    },
+                  });
                 }}
                 className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg text-sm hover:bg-red-100 font-semibold"
               >
@@ -661,6 +680,22 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
             </div>
           </div>
         </div>
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          dangerous={confirmModal.dangerous}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => setAlertModal(null)}
+        />
       )}
     </div>
   );

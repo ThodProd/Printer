@@ -42,6 +42,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [editRepair, setEditRepair] = useState<RepairEntry | null>(null);
   const [searchQuery, setSearchQuery] = useStickyState('search_repair_history', '');
   const [printerSearch, setPrinterSearch] = useStickyState('search_repair_select', '');
+  const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -78,8 +79,9 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleAddRepair = (e: React.FormEvent) => {
     e.preventDefault();
+    setFormError(null);
     if (!newRepair.printerInventoryNumber) {
-      alert('Выберите принтер');
+      setFormError('Выберите принтер');
       return;
     }
     const resolvedPrinter = store.printers.find(p =>
@@ -87,7 +89,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       (p.programId ?? '').toLowerCase() === newRepair.printerInventoryNumber.toLowerCase(),
     );
     if (!resolvedPrinter) {
-      alert('Принтер не найден по инвентарному номеру или ID');
+      setFormError('Принтер не найден по инвентарному номеру или ID');
       return;
     }
     const exists = store.repairs.some(r =>
@@ -95,7 +97,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       (r.status === 'in_repair' || r.status === 'waiting'),
     );
     if (exists) {
-      alert('Этот принтер уже находится в активном ремонте');
+      setFormError('Этот принтер уже находится в активном ремонте');
       return;
     }
     const repair: RepairEntry = {
@@ -495,8 +497,13 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     ))}
                 </div>
               )}
+              {formError && (
+                <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  {formError}
+                </p>
+              )}
               <div className="flex space-x-2 pt-2">
-                <button type="button" onClick={() => setShowAdd(false)}
+                <button type="button" onClick={() => { setShowAdd(false); setFormError(null); }}
                   className="flex-1 py-2.5 border rounded-lg text-sm hover:bg-gray-50">Отмена</button>
                 <button type="submit"
                   className="flex-1 py-2.5 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700">Оформить</button>

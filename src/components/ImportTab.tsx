@@ -4,6 +4,7 @@ import { FileText, CheckCircle2, AlertCircle, Info } from 'lucide-react';
 import { Cartridge, Printer, PrinterType } from '../types';
 import { StoreType } from '../store';
 import { COLOR_CARTRIDGES, isColorPrinter, suggestCartridgeModels, suggestDrumModel } from '../utils/cartridgeMatcher';
+import { AlertModal } from './ConfirmModal';
 
 interface ParsedPrinter extends Printer {
   _raw: string;
@@ -18,6 +19,7 @@ function normalizeInventoryNumber(value: string): string {
 const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [fileData, setFileData] = useState('');
   const [preview, setPreview] = useState<ParsedPrinter[]>([]);
+  const [alertModal, setAlertModal] = useState<{ message: string; variant?: 'info' | 'error' | 'success' } | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
 
   /**
@@ -169,7 +171,10 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setFileData('');
     setPreview([]);
     setErrors([]);
-    alert(`Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`);
+    setAlertModal({
+      message: `Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`,
+      variant: 'success',
+    });
   };
 
   return (
@@ -286,6 +291,14 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
           </div>
         )}
       </div>
+
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => setAlertModal(null)}
+        />
+      )}
     </div>
   );
 };

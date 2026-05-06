@@ -12,6 +12,7 @@ import {
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
+import { ConfirmModal, AlertModal } from './ConfirmModal';
 
 const EMPTY_PRINTER: Omit<Printer, 'inventoryNumber' | 'programId'> = {
   model: '',
@@ -155,6 +156,16 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [sortKey, setSortKey] = useState<SortKey>('inventoryNumber');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
   const showCards = (store.settings.printersViewMode ?? 'list') === 'cards';
+
+  const [confirmModal, setConfirmModal] = useState<{
+    message: string;
+    onConfirm: () => void;
+    dangerous?: boolean;
+  } | null>(null);
+  const [alertModal, setAlertModal] = useState<{
+    message: string;
+    variant?: 'info' | 'error' | 'success';
+  } | null>(null);
 
   const modelOptions = useMemo(
     () => uniqNonEmpty(store.printers.map(p => p.model)),
@@ -388,11 +399,17 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleDeletePrinter = () => {
     if (!editPrinter) return;
-    if (confirm(`Удалить принтер ${editPrinter.inventoryNumber}? Это действие нельзя отменить.`)) {
-      store.removePrinter(editPrinter.inventoryNumber);
-      setShowAddPrinter(false);
-      setEditPrinter(null);
-    }
+    setConfirmModal({
+      message: `Удалить принтер ${editPrinter.inventoryNumber}? Это действие нельзя отменить.`,
+      dangerous: true,
+      onConfirm: () => {
+        store.removePrinter(editPrinter.inventoryNumber);
+        setShowAddPrinter(false);
+        setEditPrinter(null);
+        setConfirmModal(null);
+        scheduleFocusPrintersSearch();
+      },
+    });
   };
 
   const openAddCart = (invNum: string) => {
@@ -459,7 +476,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const handleEditCartridge = (e: React.FormEvent) => {
     e.preventDefault();
     if (editPin !== pinCode) {
-      alert('Неверный PIN-код');
+      setAlertModal({ message: 'Неверный PIN-код', variant: 'error' });
       return;
     }
     if (!editCartridgeId) return;
@@ -473,13 +490,19 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleDeleteCartridge = () => {
     if (!editCartridgeId) return;
-    if (confirm(`Удалить расходник ${editCartridgeId}? Это действие нельзя отменить.`)) {
-      store.removeCartridge(editCartridgeId);
-      setEditCartridgeId(null);
-      setEditPin('');
-      setCartPrintStatus(null);
-      scheduleFocusPrintersSearch();
-    }
+    const idToDelete = editCartridgeId;
+    setConfirmModal({
+      message: `Удалить расходник ${idToDelete}? Это действие нельзя отменить.`,
+      dangerous: true,
+      onConfirm: () => {
+        store.removeCartridge(idToDelete);
+        setEditCartridgeId(null);
+        setEditPin('');
+        setCartPrintStatus(null);
+        setConfirmModal(null);
+        scheduleFocusPrintersSearch();
+      },
+    });
   };
 
   const handleSaveDetailsCartEdit = () => {
@@ -530,23 +553,30 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   const handleDisposeCartridgeFromCard = (cartridge: Cartridge) => {
-    if (!confirm(`Списать и удалить ${cartridge.id}?`)) return;
-    store.updateCartridgeStatus(cartridge.id, 'disposed', 'Списан вручную из карточки принтера');
-    const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-    store.addRefillLog({
-      id: Math.random().toString(36).substr(2, 9),
-      date: new Date().toISOString(),
-      cartridgeId: cartridge.id,
-      cartridgeModel: cartridge.model,
-      consumableType: cartridge.consumableType ?? 'cartridge',
-      deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
-      serviceType: 'refill',
-      printerInventoryNumber: cartridge.printerInventoryNumber,
-      printerModel: printer?.model ?? '',
-      department: printer?.department ?? '',
-      action: 'Списан/удален из карточки принтера',
+    setConfirmModal({
+      message: `Списать и удалить ${cartridge.id}?`,
+      dangerous: true,
+      onConfirm: () => {
+        setConfirmModal(null);
+        store.updateCartridgeStatus(cartridge.id, 'disposed', 'Списан вручную из карточки принтера');
+        const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+        store.addRefillLog({
+          id: Math.random().toString(36).substr(2, 9),
+          date: new Date().toISOString(),
+          cartridgeId: cartridge.id,
+          cartridgeModel: cartridge.model,
+          consumableType: cartridge.consumableType ?? 'cartridge',
+          deviceType: cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж',
+          serviceType: 'refill',
+          printerInventoryNumber: cartridge.printerInventoryNumber,
+          printerModel: printer?.model ?? '',
+          department: printer?.department ?? '',
+          action: 'Списан/удален из карточки принтера',
+        });
+        store.removeCartridge(cartridge.id);
+        scheduleFocusPrintersSearch();
+      },
     });
-    store.removeCartridge(cartridge.id);
   };
 
   const handleReplaceCartridge = () => {
@@ -1202,9 +1232,16 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <button
                       type="button"
                       onClick={() => {
-                        if (!confirm('Снять отметку «прошит» у этого принтера? На этикетках переменная {fw} перестанет печататься.')) return;
-                        store.updatePrinter(detailsPrinter.inventoryNumber, { firmwareFlashed: false });
-                        setDetailsPrinter({ ...detailsPrinter, firmwareFlashed: false });
+                        const snap = detailsPrinter;
+                        setConfirmModal({
+                          message: 'Снять отметку «прошит» у этого принтера? На этикетках переменная {fw} перестанет печататься.',
+                          onConfirm: () => {
+                            store.updatePrinter(snap.inventoryNumber, { firmwareFlashed: false });
+                            setDetailsPrinter({ ...snap, firmwareFlashed: false });
+                            setConfirmModal(null);
+                            scheduleFocusPrintersSearch();
+                          },
+                        });
                       }}
                       className="w-full py-2 border border-amber-200 bg-amber-50 text-amber-900 rounded-lg text-sm font-semibold hover:bg-amber-100 flex items-center justify-center gap-2"
                     >
@@ -1794,6 +1831,22 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
             </button>
           </div>
         </div>
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          dangerous={confirmModal.dangerous}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => { setConfirmModal(null); scheduleFocusPrintersSearch(); }}
+        />
+      )}
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => { setAlertModal(null); scheduleFocusPrintersSearch(); }}
+        />
       )}
     </div>
   );

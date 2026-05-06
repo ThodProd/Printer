@@ -9,6 +9,7 @@ import { Cartridge, LabelTemplate, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, DOTS_PER_MM, getTemplate } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
+import { ConfirmModal } from './ConfirmModal';
 
 const PREVIEW_DOTS_SCALE = 0.35;
 
@@ -148,6 +149,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [selectedPrinterInv, setSelectedPrinterInv] = useState('');
   const [selectedCartridgeId, setSelectedCartridgeId] = useState('');
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -224,29 +226,35 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (selectedCartridge) doPrint(selectedCartridge);
   };
 
-  const handleReplace = async () => {
+  const handleReplace = () => {
     if (!selectedCartridge) return;
-    if (!confirm(`Заменить ID ${selectedCartridge.id} на новый? Этикетка печататься не будет.`)) return;
-    const newId = store.generateConsumableId(selectedCartridge.consumableType ?? 'cartridge');
-    const oldId = selectedCartridge.id;
-    store.setCartridges(prev => prev.map(c => c.id === oldId ? {
-      ...c,
-      id: newId,
-      barcode: newId,
-      history: [...c.history, {
-        id: Math.random().toString(36).substr(2, 9),
-        date: new Date().toISOString(),
-        action: `ID заменён: ${oldId} → ${newId}`,
-      }],
-    } : c));
-    store.setBatches(prev => prev.map(batch => ({
-      ...batch,
-      cartridgeIds: batch.cartridgeIds.map(id => id === oldId ? newId : id),
-      items: (batch.items ?? []).map(item => item.kind === 'cartridge' && item.id === oldId ? { ...item, id: newId } : item),
-    })));
-    store.setRefillLog(prev => prev.map(entry => entry.cartridgeId === oldId ? { ...entry, cartridgeId: newId } : entry));
-    setSelectedCartridgeId(newId);
-    setPrintStatus({ text: `ID заменён: ${oldId} → ${newId}`, ok: true });
+    const snap = selectedCartridge;
+    setConfirmModal({
+      message: `Заменить ID ${snap.id} на новый? Этикетка печататься не будет.`,
+      onConfirm: () => {
+        setConfirmModal(null);
+        const newId = store.generateConsumableId(snap.consumableType ?? 'cartridge');
+        const oldId = snap.id;
+        store.setCartridges(prev => prev.map(c => c.id === oldId ? {
+          ...c,
+          id: newId,
+          barcode: newId,
+          history: [...c.history, {
+            id: Math.random().toString(36).substr(2, 9),
+            date: new Date().toISOString(),
+            action: `ID заменён: ${oldId} → ${newId}`,
+          }],
+        } : c));
+        store.setBatches(prev => prev.map(batch => ({
+          ...batch,
+          cartridgeIds: batch.cartridgeIds.map(id => id === oldId ? newId : id),
+          items: (batch.items ?? []).map(item => item.kind === 'cartridge' && item.id === oldId ? { ...item, id: newId } : item),
+        })));
+        store.setRefillLog(prev => prev.map(entry => entry.cartridgeId === oldId ? { ...entry, cartridgeId: newId } : entry));
+        setSelectedCartridgeId(newId);
+        setPrintStatus({ text: `ID заменён: ${oldId} → ${newId}`, ok: true });
+      },
+    });
   };
 
   const handlePrintPrinter = async () => {
@@ -279,11 +287,17 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleReplacePrinterId = () => {
     if (!selectedPrinter) return;
-    const oldId = selectedPrinter.programId ?? selectedPrinter.inventoryNumber;
-    if (!confirm(`Заменить ID принтера ${oldId} на новый? Этикетка печататься не будет.`)) return;
-    const newId = store.generatePrinterId(selectedPrinter.inventoryNumber);
-    store.updatePrinter(selectedPrinter.inventoryNumber, { programId: newId });
-    setPrintStatus({ text: `ID принтера заменён: ${oldId} → ${newId}`, ok: true });
+    const snap = selectedPrinter;
+    const oldId = snap.programId ?? snap.inventoryNumber;
+    setConfirmModal({
+      message: `Заменить ID принтера ${oldId} на новый? Этикетка печататься не будет.`,
+      onConfirm: () => {
+        setConfirmModal(null);
+        const newId = store.generatePrinterId(snap.inventoryNumber);
+        store.updatePrinter(snap.inventoryNumber, { programId: newId });
+        setPrintStatus({ text: `ID принтера заменён: ${oldId} → ${newId}`, ok: true });
+      },
+    });
   };
 
   return (
@@ -489,6 +503,14 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
           )}
         </div>
       </div>
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
     </div>
   );
 };

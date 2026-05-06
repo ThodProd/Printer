@@ -9,6 +9,7 @@ import { NewCartridge } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
+import { ConfirmModal } from './ConfirmModal';
 
 const EMPTY: Omit<NewCartridge, 'id' | 'registrationDate'> = {
   model: '',
@@ -24,6 +25,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [form, setForm] = useState<Omit<NewCartridge, 'id' | 'registrationDate'>>(EMPTY);
   const [search, setSearch] = useStickyState('search_new_cartridges', '');
   const [printStatus, setPrintStatus] = useState<{ id: string; text: string; ok: boolean } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -119,10 +121,15 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleDelete = () => {
     if (!editItem) return;
-    if (confirm('Удалить этот картридж со склада?')) {
-      store.removeNewCartridge(editItem.id);
-      setShowAdd(false);
-    }
+    const idToDelete = editItem.id;
+    setConfirmModal({
+      message: 'Удалить этот картридж со склада?',
+      onConfirm: () => {
+        store.removeNewCartridge(idToDelete);
+        setShowAdd(false);
+        setConfirmModal(null);
+      },
+    });
   };
 
   const handlePrint = async (item: NewCartridge) => {
@@ -425,6 +432,15 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
             </form>
           </div>
         </div>
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          dangerous
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
       )}
     </div>
   );
