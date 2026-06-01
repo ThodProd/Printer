@@ -1,5 +1,5 @@
 
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import {
   Plus, Printer as PrinterIcon, User, MapPin, Search, Edit2, Wrench, X, Hash,
   ChevronDown, ChevronUp, Calendar, DollarSign, Users, Trash2, RefreshCw,
@@ -8,10 +8,12 @@ import {
 import {
   Printer, Cartridge, STATUS_LABELS, STATUS_COLORS, ConsumableType,
   EmployeeRecord, ConsumableColor,
+  CartridgeStatus,
 } from '../types';
 import { StoreType } from '../store';
-import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { buildTSPLLabel, cleanInventoryNumber, getTemplate } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
+import { mergeLedgerWithStore } from '../utils/warehouseStoreBridge';
 import { ConfirmModal, AlertModal } from './ConfirmModal';
 
 const EMPTY_PRINTER: Omit<Printer, 'inventoryNumber' | 'programId'> = {
@@ -219,7 +221,10 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   }, [store.printers]);
 
   function getCartridges(invNum: string) {
-    return store.cartridges.filter((c: Cartridge) => c.printerInventoryNumber === invNum);
+    const n = cleanInventoryNumber(invNum);
+    return store.cartridges.filter(
+      (c: Cartridge) => cleanInventoryNumber(c.printerInventoryNumber) === n,
+    );
   }
 
   const filteredPrinters = useMemo(() => {
@@ -291,6 +296,40 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     });
     return ids;
   }, [store.refillLog]);
+
+  /** Как на вкладке «Склады»: тот же merge реестра и БД — бейджи не «залипают» на старом статусе картриджа. */
+  const mergedWarehouseItems = useMemo(
+    () =>
+      mergeLedgerWithStore(
+        store.warehouseLedger,
+        store.cartridges,
+        store.repairs,
+        store.printers,
+      ),
+    [store.warehouseLedger, store.cartridges, store.repairs, store.printers],
+  );
+
+  const cartridgeDisplayStatus = useCallback(
+    (c: Cartridge): CartridgeStatus => {
+      const row = mergedWarehouseItems.find(
+        m => m.id === c.id && (m.type === 'Картридж' || m.type === 'Драм-картридж'),
+      );
+      if (!row) return c.status;
+      switch (row.status) {
+        case 'waiting':
+          return 'waiting';
+        case 'at_refill':
+          return 'at_refill';
+        case 'ready':
+          return c.status === 'received_from_refill' ? 'received_from_refill' : 'ready';
+        case 'issued':
+          return 'on_hand';
+        default:
+          return c.status;
+      }
+    },
+    [mergedWarehouseItems],
+  );
 
   /** Списан/заменён по статусу; подсветка по журналу не перекрывает «Готов к выдаче» и др. рабочие статусы. */
   const isDisposedLike = (c: Cartridge) => {
@@ -491,7 +530,6 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         balanceCost: printer?.balanceCost ?? '',
         consumableType: addCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
         status: STATUS_LABELS.on_hand,
-        firmwareFlashed: !!printer?.firmwareFlashed,
       });
       await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     }
@@ -580,7 +618,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         department: printer?.department ?? '',
         employee: printer?.boss,
         action: 'Расходник отмечен как списан в карточке принтера',
-        is_technical: true,
+        is_technical: false,
       });
     } else if (!wantDisposed && c.status === 'disposed' && !c.isReplaced) {
       store.updateCartridgeStatus(c.id, 'on_hand', 'Снята отметка списания в карточке принтера');
@@ -620,7 +658,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
           department: printer?.department ?? '',
           employee: printer?.boss,
           action: 'Расходник списан и удалён из карточки принтера',
-          is_technical: true,
+          is_technical: false,
         });
         store.removeCartridge(cartridge.id);
         scheduleFocusPrintersSearch();
@@ -655,16 +693,31 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     store.addRefillLog({
       id: Math.random().toString(36).substr(2, 9),
       date: new Date().toISOString(),
+      cartridgeId: editCartridgeId,
+      cartridgeModel: cart.model,
+      consumableType: cart.consumableType ?? 'cartridge',
+      deviceType: cart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+      serviceType: 'Списание',
+      printerInventoryNumber: cart.printerInventoryNumber,
+      printerModel: printer?.model ?? '',
+      department: printer?.department ?? '',
+      employee: printer?.boss,
+      action: `Расходник списан при замене на ${newId} (${newCart.model})`,
+      is_technical: false,
+    });
+    store.addRefillLog({
+      id: Math.random().toString(36).substr(2, 9),
+      date: new Date().toISOString(),
       cartridgeId: newId,
       cartridgeModel: newCart.model,
       consumableType: newCart.consumableType ?? 'cartridge',
       deviceType: newCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-      serviceType: 'Редактирование',
+      serviceType: 'Создание',
       printerInventoryNumber: newCart.printerInventoryNumber,
       printerModel: printer?.model ?? '',
       department: printer?.department ?? '',
       employee: printer?.boss,
-      action: `Расходник заменён на новый (старый ID: ${editCartridgeId})`,
+      action: `Новый расходник ${newId} при замене ${editCartridgeId}`,
       is_technical: true,
     });
     setEditCartridgeId(newId);
@@ -701,8 +754,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       commissionDate: printer?.commissionDate ?? '',
       balanceCost: printer?.balanceCost ?? '',
       consumableType: cart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-      status: STATUS_LABELS[cart.status],
-      firmwareFlashed: !!printer?.firmwareFlashed,
+      status: STATUS_LABELS[cartridgeDisplayStatus(cart)],
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     if (cartId) {
@@ -781,10 +833,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <PrinterIcon size={20} />
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-bold text-sm leading-tight flex items-center gap-1.5 min-w-0">
-                <span className="truncate">{printer.model}</span>
+              <div className="font-bold text-sm leading-tight flex items-start gap-1.5 min-w-0">
+                <span className="break-words">{printer.model}</span>
                 {printer.firmwareFlashed && (
-                  <span className="inline-block w-2 h-2 rounded-full bg-red-500 shrink-0" title="Прошит" />
+                  <span
+                    className="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-red-500 ring-2 ring-red-200"
+                    title="Прошит"
+                    aria-label="Прошит"
+                  />
                 )}
               </div>
               <div className="flex items-center space-x-2 mt-0.5 flex-wrap gap-1">
@@ -894,8 +950,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       )}
                     </div>
                     <div className="flex items-center space-x-1 shrink-0">
-                      <span className={`px-1.5 py-0.5 rounded-full font-bold ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[c.status]}`} style={{ fontSize: '10px' }}>
-                        {STATUS_LABELS[c.status]}
+                      <span className={`px-1.5 py-0.5 rounded-full font-bold ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[cartridgeDisplayStatus(c)]}`} style={{ fontSize: '10px' }}>
+                        {STATUS_LABELS[cartridgeDisplayStatus(c)]}
                       </span>
                       {/* Print barcode button for cartridge */}
                       <button
@@ -930,7 +986,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 <button
                   key={c.id}
                   onClick={() => handlePrintCartridge(c.id)}
-                  className={`text-xs px-1.5 py-0.5 rounded-full font-bold hover:ring-2 hover:ring-blue-200 ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[c.status]}`}
+                  className={`text-xs px-1.5 py-0.5 rounded-full font-bold hover:ring-2 hover:ring-blue-200 ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[cartridgeDisplayStatus(c)]}`}
                   title="Напечатать этикетку расходника"
                 >
                   <ColorDot color={c.color} />
@@ -994,7 +1050,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       {items.length === 0 ? (
         <div className="text-gray-300 italic text-sm py-4 text-center">Нет записей</div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {items.map(p => <PrinterCard key={p.inventoryNumber} printer={p} />)}
         </div>
       )}
@@ -1067,10 +1123,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}</td>
                   <td className="px-4 py-3"><PrinterTypeBadge type={p.printerType} /></td>
                   <td className="px-4 py-3 font-semibold">
-                    <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-flex items-center gap-1.5 flex-wrap">
                       <span>{p.model}</span>
                       {p.firmwareFlashed && (
-                        <span className="inline-block w-2 h-2 rounded-full bg-red-500 shrink-0" title="Прошит" />
+                        <span
+                          className="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-red-500 ring-2 ring-red-200"
+                          title="Прошит"
+                          aria-label="Прошит"
+                        />
                       )}
                     </span>
                   </td>
@@ -1091,7 +1151,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         const isDisposed = isDisposedLike(c);
                         return (
                           <button key={c.id} onClick={() => handlePrintCartridge(c.id)}
-                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${isDisposed ? 'bg-red-100 text-red-700' : STATUS_COLORS[c.status]}`}
+                            className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${isDisposed ? 'bg-red-100 text-red-700' : STATUS_COLORS[cartridgeDisplayStatus(c)]}`}
                             title="Напечатать этикетку расходника">
                             <ColorDot color={c.color} />
                             {getConsumableLabel(c, carts)}
@@ -1226,7 +1286,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               }
             }}
           >
-            <div className="bg-white rounded-2xl max-w-3xl w-full shadow-2xl overflow-hidden" onMouseDown={e => e.stopPropagation()}>
+            <div className="bg-white rounded-2xl max-w-5xl w-full shadow-2xl overflow-hidden" onMouseDown={e => e.stopPropagation()}>
               <div className="bg-gradient-to-r from-blue-600 to-cyan-500 text-white p-5 flex items-start justify-between">
                 <div className="flex items-center gap-4">
                   <div className="h-20 w-24 rounded-2xl bg-white/20 border border-white/30 flex items-center justify-center">
@@ -1235,9 +1295,13 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <div>
                     <div className="text-xs uppercase opacity-75">Карточка устройства</div>
                     <div className="text-xl font-bold flex items-center gap-2 flex-wrap">
-                      <span>{detailsPrinter.model}</span>
+                      <span className="break-words">{detailsPrinter.model}</span>
                       {detailsPrinter.firmwareFlashed && (
-                        <span className="inline-block w-2.5 h-2.5 rounded-full bg-red-500 shrink-0" title="Прошит" />
+                        <span
+                          className="shrink-0 inline-block w-2 h-2 rounded-full bg-white ring-2 ring-white/50"
+                          title="Прошит"
+                          aria-label="Прошит"
+                        />
                       )}
                     </div>
                     <div className="text-sm opacity-90 font-mono">{detailsPrinter.inventoryNumber}</div>
@@ -1272,10 +1336,11 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     {detailsPrinter.firmwareFlashed && (
                       <div className="flex justify-between gap-3 items-center pt-1 border-t border-gray-200">
                         <span className="text-gray-500">Прошивка</span>
-                        <span className="text-xs font-bold text-red-600 flex items-center gap-1">
-                          выполнена
-                          <span className="inline-block w-2 h-2 rounded-full bg-red-500" title="Прошит" />
-                        </span>
+                        <span
+                          className="inline-block w-2 h-2 rounded-full bg-red-500 ring-2 ring-red-200"
+                          title="Прошит"
+                          aria-label="Прошит"
+                        />
                       </div>
                     )}
                   </div>
@@ -1332,7 +1397,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                               <ColorDot color={c.color} /> {getConsumableLabel(c, carts)}
                             </button>
                             <div className="flex items-center gap-0.5">
-                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[c.status]}`}>{STATUS_LABELS[c.status]}</span>
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${isDisposedLike(c) ? 'bg-red-100 text-red-700' : STATUS_COLORS[cartridgeDisplayStatus(c)]}`}>{STATUS_LABELS[cartridgeDisplayStatus(c)]}</span>
                               <button
                                 type="button"
                                 onClick={() => {

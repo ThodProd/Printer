@@ -1,7 +1,7 @@
 
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  ClipboardList, Download, Search, BarChart2, MapPin, Settings2,
+  ClipboardList, Download, Search, BarChart2, MapPin,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { StoreType } from '../store';
@@ -176,12 +176,17 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
     });
   }, [tabEntries, search, dateFrom, dateTo, filterDepartment]);
 
-  // Stats: top printers by refill count
+  // Статистика: топ принтеров по числу отправок на заправку (как в журнале)
   const printerStats = useMemo(() => {
     const map = new Map<string, { inv: string; model: string; department: string; count: number }>();
     baseLog
-      .filter(e => (e.serviceType === 'Заправка' || e.serviceType === 'shipment') &&
-        (e.action.includes('отправлен на заправку') || e.action.includes('Картридж отправлен') || e.action.includes('Отправлен на заправку')))
+      .filter(
+        e =>
+          (e.serviceType === 'Заправка' || e.serviceType === 'shipment') &&
+          (e.action.includes('отправлен на заправку') ||
+            e.action.includes('Картридж отправлен') ||
+            e.action.includes('Отправлен на заправку')),
+      )
       .forEach(e => {
         const key = e.printerInventoryNumber;
         const existing = map.get(key);
@@ -189,7 +194,12 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
           existing.count++;
         } else {
           const printer = store.printers.find(p => p.inventoryNumber === key);
-          map.set(key, { inv: key, model: e.printerModel, department: printer?.department ?? '', count: 1 });
+          map.set(key, {
+            inv: key,
+            model: e.printerModel,
+            department: printer?.department ?? e.department ?? '',
+            count: 1,
+          });
         }
       });
     return Array.from(map.values()).sort((a, b) => b.count - a.count);
@@ -206,16 +216,21 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const exportToExcel = () => {
     const data = filtered.map(e => ({
-      'Дата': new Date(e.date).toLocaleString('ru-RU'),
-      'ID': e.cartridgeId,
-      'Модель': e.cartridgeModel,
-      'Тип': normalizedTypeLabel(e),
-      'Вид услуги': serviceTypeLabel(e.serviceType),
-      'Действие': e.action,
+      'ID записи': e.id,
+      Дата: new Date(e.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': e.date,
+      'ID картриджа/объекта': e.cartridgeId,
+      Модель: e.cartridgeModel,
+      'Тип (код)': e.consumableType,
+      'Тип (как в списке)': normalizedTypeLabel(e),
+      'Тип устройства': e.deviceType ?? '',
+      'Вид услуги (код)': e.serviceType ?? '',
+      'Тип услуги': serviceTypeLabel(e.serviceType),
+      Действие: e.action,
       'Инв. № принтера': e.printerInventoryNumber,
       'Модель принтера': e.printerModel,
-      'Подразделение': e.department ?? '',
-      'Сотрудник': e.employee ?? '',
+      Подразделение: e.department ?? '',
+      Сотрудник: e.employee ?? '',
       'Техническая запись': isTechnical(e) ? 'Да' : 'Нет',
     }));
 
@@ -233,23 +248,13 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   return (
-    <div className="h-full min-h-0 flex flex-col gap-5 overflow-hidden">
+    <div className="h-full min-h-0 flex flex-col gap-3 overflow-hidden">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-bold text-gray-800 flex items-center space-x-2">
           <ClipboardList size={22} className="text-blue-600" />
           <span>Журнал</span>
         </h2>
         <div className="flex items-center gap-3">
-          <label className="inline-flex items-center gap-1.5 text-xs text-gray-600 cursor-pointer select-none">
-            <Settings2 size={13} className="text-gray-400" />
-            <input
-              type="checkbox"
-              checked={showTech}
-              onChange={e => store.setSettings({ ...store.settings, showTechLogs: e.target.checked })}
-              className="rounded"
-            />
-            <span>Показывать технические записи</span>
-          </label>
           <button
             onClick={exportToExcel}
             className="flex items-center space-x-2 px-4 py-2 bg-green-600 text-white rounded-lg text-sm font-bold hover:bg-green-700"
@@ -260,62 +265,53 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
       </div>
 
-      {/* Stats cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="bg-white rounded-xl border p-4 text-center">
-          <div className="text-2xl font-bold text-blue-600">{baseLog.filter(e => !isTechnical(e)).length}</div>
-          <div className="text-xs text-gray-500 mt-1">Основных записей</div>
+      {/* Компактная сводка + минималистичный топ по подразделениям */}
+      <div className="bg-white rounded-lg border border-gray-200 px-2.5 py-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] leading-tight">
+        <div className="inline-flex items-baseline gap-1 shrink-0">
+          <span className="font-extrabold text-blue-600 tabular-nums text-sm">{baseLog.filter(e => !isTechnical(e)).length}</span>
+          <span className="text-gray-500">записей</span>
         </div>
-        <div className="bg-white rounded-xl border p-4 text-center">
-          <div className="text-2xl font-bold text-purple-600">{uniqueCartridgeCount}</div>
-          <div className="text-xs text-gray-500 mt-1">Картриджей</div>
+        <span className="text-gray-200 hidden sm:inline">|</span>
+        <div className="inline-flex items-baseline gap-1 shrink-0">
+          <span className="font-extrabold text-purple-600 tabular-nums text-sm">{uniqueCartridgeCount}</span>
+          <span className="text-gray-500">картр.</span>
         </div>
-        <div className="bg-white rounded-xl border p-4 text-center">
-          <div className="text-2xl font-bold text-orange-600">{uniqueDrumCount}</div>
-          <div className="text-xs text-gray-500 mt-1">Драм-картриджей</div>
+        <div className="inline-flex items-baseline gap-1 shrink-0">
+          <span className="font-extrabold text-orange-600 tabular-nums text-sm">{uniqueDrumCount}</span>
+          <span className="text-gray-500">драм</span>
         </div>
-        <div className="bg-white rounded-xl border p-4 text-center">
-          <div className="text-2xl font-bold text-green-600">{printerStats.length}</div>
-          <div className="text-xs text-gray-500 mt-1">Принтеров в журнале</div>
+        <div className="inline-flex items-baseline gap-1 shrink-0">
+          <span className="font-extrabold text-green-600 tabular-nums text-sm">{printerStats.length}</span>
+          <span className="text-gray-500">принтеров</span>
         </div>
+        {printerStats.length > 0 && (
+          <>
+            <span className="text-gray-200 hidden md:inline">|</span>
+            <div className="inline-flex items-center gap-x-1.5 gap-y-0.5 flex-wrap min-w-0">
+              <BarChart2 size={11} className="text-blue-500 shrink-0" />
+              {printerStats.slice(0, 3).map((s, idx) => {
+                const deptLabel = (s.department || '').trim() || '—';
+                return (
+                  <span key={s.inv} className="inline-flex items-baseline gap-0.5 text-[10px] text-gray-600">
+                    {idx > 0 && <span className="text-gray-200 mx-0.5">·</span>}
+                    <span className="font-semibold text-gray-700 truncate max-w-[88px]" title={`${deptLabel} · инв. ${s.inv} · ${s.count} отпр.`}>
+                      {deptLabel}
+                    </span>
+                    <span className="text-blue-600 font-extrabold tabular-nums shrink-0">{s.count}</span>
+                  </span>
+                );
+              })}
+              <button
+                type="button"
+                onClick={() => setShowTopModal(true)}
+                className="text-[10px] font-semibold text-blue-600 hover:underline shrink-0 ml-0.5"
+              >
+                все →
+              </button>
+            </div>
+          </>
+        )}
       </div>
-
-      {/* Top printers */}
-      {printerStats.length > 0 && (
-        <div className="bg-white rounded-xl border p-4">
-          <h3 className="font-bold text-gray-700 text-sm mb-3 flex items-center space-x-2">
-            <BarChart2 size={15} className="text-blue-600" />
-            <span>Топ принтеров по заправкам</span>
-          </h3>
-          <div className="space-y-1.5">
-            {printerStats.slice(0, 3).map(s => {
-              const maxCount = printerStats[0].count;
-              return (
-                <div key={s.inv} className="flex items-center space-x-2 text-sm">
-                  <div className="w-44 shrink-0 font-mono font-bold text-gray-700">{s.inv}</div>
-                  <div className="flex-1 bg-gray-100 rounded-full h-4 overflow-hidden">
-                    <div
-                      className="bg-blue-500 h-full rounded-full"
-                      style={{ width: `${(s.count / maxCount) * 100}%` }}
-                    />
-                  </div>
-                  <div className="w-8 text-right text-xs font-bold text-gray-600">{s.count}</div>
-                  <div className="w-36 text-xs text-gray-400 truncate">{s.model}</div>
-                  {s.department && (
-                    <div className="hidden lg:flex items-center space-x-0.5 text-xs text-gray-400 w-32 truncate">
-                      <MapPin size={10} />
-                      <span>{s.department}</span>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          <button onClick={() => setShowTopModal(true)} className="mt-3 text-xs font-semibold text-blue-600 hover:underline">
-            Развернуть рейтинг
-          </button>
-        </div>
-      )}
 
       {/* Tab navigation */}
       <div className="flex gap-1 border-b">
@@ -483,13 +479,13 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
           <div className="bg-white rounded-2xl w-full max-w-3xl max-h-[80vh] overflow-hidden">
             <div className="p-4 border-b flex items-center justify-between">
               <h3 className="font-bold">Рейтинг заправок</h3>
-              <button onClick={() => setShowTopModal(false)}>✕</button>
+              <button type="button" onClick={() => setShowTopModal(false)}>✕</button>
             </div>
             <div className="p-4">
               <input
                 value={topSearch}
                 onChange={e => setTopSearch(e.target.value)}
-                placeholder="Поиск по инвентарному номеру..."
+                placeholder="Поиск: инв. №, модель или подразделение..."
                 className="w-full mb-3 p-2 border rounded-lg text-sm"
               />
               <div className="max-h-[55vh] overflow-auto">
@@ -504,7 +500,15 @@ const RefillLogTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </thead>
                   <tbody>
                     {printerStats
-                      .filter(s => s.inv.toLowerCase().includes(topSearch.toLowerCase()))
+                      .filter(s => {
+                        const q = topSearch.toLowerCase();
+                        if (!q) return true;
+                        return (
+                          s.inv.toLowerCase().includes(q) ||
+                          s.model.toLowerCase().includes(q) ||
+                          (s.department || '').toLowerCase().includes(q)
+                        );
+                      })
                       .map(s => (
                         <tr key={s.inv} className="border-t">
                           <td className="p-2 font-mono">{s.inv}</td>

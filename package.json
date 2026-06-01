@@ -16,8 +16,11 @@
     "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win zip dir --x64 --publish never",
     "dist:exe": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable dir --x64 --publish never",
     "dist:portable": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable --x64 --publish never",
+    "exe": "npm run dist:portable",
+    "quick:exe": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable --x64 --publish never --config.win.signAndEditExecutable=false",
     "dist:quick": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win dir --x64 --publish never --config.win.signAndEditExecutable=false",
     "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never",
+    "installer:signed:ps": "powershell -ExecutionPolicy Bypass -File ./scripts/installer-signed.ps1",
     "dist:signed": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dist:all": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis zip dir --x64 --publish never",
     "dist:all:signed": "npm run build && electron-builder --win nsis zip dir --x64 --publish never",
@@ -31,7 +34,7 @@
     "icon": "build/icon.ico",
     "copyright": "CartridgeControl 2026",
     "directories": {
-      "output": "release",
+      "output": "../Printer-release",
       "buildResources": "build"
     },
     "files": [

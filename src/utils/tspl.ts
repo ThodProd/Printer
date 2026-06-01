@@ -64,8 +64,8 @@ function dots(value: number | undefined, fallback = 0): number {
   return Math.max(0, Math.round(value ?? fallback));
 }
 
-/** Метка «прошивка есть» на этикетке (буква «П» — в шрифтах TSC точка/● часто уходят в «?») */
-export const LABEL_FIRMWARE_MARK = 'П';
+/** Метка «прошивка есть» на этикетке ({fw} / {firmware}) */
+export const LABEL_FIRMWARE_MARK = 'Прошит';
 
 export interface LabelData {
   id: string;
@@ -105,10 +105,11 @@ function normalizeLegacyFirmwareToken(tspl: string): string {
 export function resolveContent(
   tpl: string,
   data: LabelData,
+  options?: { preserveFirmwareTokens?: boolean },
 ): string {
   const printerModel = data.printerModel ?? data.model ?? '';
   const fio = data.fio ?? data.boss ?? '';
-  return tpl
+  let out = tpl
     .replace(/\{id\}/g, data.id)
     .replace(/\{inv\}/g, data.inv)
     .replace(/\{model\}/g, printerModel)
@@ -127,9 +128,15 @@ export function resolveContent(
     .replace(/\{location\}/g, data.location ?? '')
     .replace(/\{description\}/g, data.description ?? '')
     .replace(/\{vendor\}/g, data.vendor ?? '')
-    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
-    .replace(/\{fw\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
-    .replace(/\{firmware\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '');
+    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
+
+  if (!options?.preserveFirmwareTokens) {
+    out = out
+      .replace(/\{fw\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
+      .replace(/\{firmware\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '');
+  }
+
+  return out;
 }
 
 /** Build a complete TSPL print job from template + settings + data */
@@ -152,7 +159,7 @@ export function buildTSPLLabel(
   const lines: string[] = [buildTSPLHeader(effectiveSettings)];
 
   template.elements.forEach(el => {
-    const content = esc(resolveContent(el.content, data));
+    const content = esc(resolveContent(el.content, data, { preserveFirmwareTokens: true }));
     const x = dots(el.x);
     const y = dots(el.y);
     const rotation = el.rotation ?? 0;

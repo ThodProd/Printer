@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { exec, execSync } = require('child_process');
+const crypto = require('crypto');
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -184,8 +185,115 @@ function writeBackupSnapshot(data, reason = 'auto') {
   }
 }
 
+let _sessionStartTime = null;
+
+function formatDate(date) {
+  const pad = num => String(num).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const MM = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const HH = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  return `${yyyy}-${MM}-${dd}_${HH}-${mm}-${ss}`;
+}
+
+function getFileHash(filePath) {
+  try {
+    const content = fs.readFileSync(filePath);
+    return crypto.createHash('sha256').update(content).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
+function InitializeBackupSystem() {
+  try {
+    const base = getDataDir();
+    const backupsDir = path.join(base, 'backups');
+    const tempDir = path.join(base, 'temp');
+    
+    if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+    _sessionStartTime = new Date();
+
+    const dbPath = getDatabasePath();
+    const tempDbPath = path.join(tempDir, 'database_temp.json');
+
+    // 1. Проверяем, есть ли временный файл от предыдущего некорректного запуска
+    if (fs.existsSync(tempDbPath)) {
+      try {
+        const stat = fs.statSync(tempDbPath);
+        const crashTime = stat.mtime || stat.ctime || new Date();
+        const crashBackupName = `Аварийное_завершение_${formatDate(crashTime)}.json`;
+        const crashBackupPath = path.join(backupsDir, crashBackupName);
+
+        if (fs.existsSync(crashBackupPath)) {
+          fs.unlinkSync(crashBackupPath);
+        }
+        fs.renameSync(tempDbPath, crashBackupPath);
+        appendAppLog(`Обнаружено некорректное завершение работы. База восстановлена в бэкап: ${crashBackupName}`);
+      } catch (ex) {
+        appendAppLog(`Ошибка при обработке аварийного файла бэкапа: ${ex.message}`);
+      }
+    }
+
+    // 2. Если текущая база существует, сохраняем её во временную папку для текущей сессии
+    if (fs.existsSync(dbPath)) {
+      fs.copyFileSync(dbPath, tempDbPath);
+      // Установим время изменения временного файла равным времени начала сессии
+      fs.utimesSync(tempDbPath, _sessionStartTime, _sessionStartTime);
+      appendAppLog(`База данных скопирована во временный файл для сессии`);
+    }
+  } catch (ex) {
+    appendAppLog(`Ошибка инициализации системы бэкапов: ${ex.message}`);
+  }
+}
+
+function FinalizeBackupSystem() {
+  try {
+    const base = getDataDir();
+    const backupsDir = path.join(base, 'backups');
+    const tempDir = path.join(base, 'temp');
+    const dbPath = getDatabasePath();
+    const tempDbPath = path.join(tempDir, 'database_temp.json');
+
+    if (fs.existsSync(tempDbPath) && fs.existsSync(dbPath)) {
+      const hashOpening = getFileHash(tempDbPath);
+      const hashClosing = getFileHash(dbPath);
+
+      // Если хэши не совпадают, значит были изменения в БД за время сессии
+      if (hashOpening !== hashClosing) {
+        const sessionEndTime = new Date();
+
+        const openingBackupName = `Открытие_${formatDate(_sessionStartTime)}.json`;
+        const closingBackupName = `Закрытие_${formatDate(sessionEndTime)}.json`;
+
+        const openingBackupPath = path.join(backupsDir, openingBackupName);
+        const closingBackupPath = path.join(backupsDir, closingBackupName);
+
+        // Копируем временный файл (состояние на момент открытия) в бэкапы
+        fs.copyFileSync(tempDbPath, openingBackupPath);
+        // Копируем текущий файл (состояние на момент закрытия) в бэкапы
+        fs.copyFileSync(dbPath, closingBackupPath);
+
+        appendAppLog(`Созданы бэкапы сессии: ${openingBackupName} и ${closingBackupName}`);
+      } else {
+        appendAppLog(`Изменений в базе данных не обнаружено. Бэкапы сессии не создавались.`);
+      }
+
+      // Удаляем временный файл при нормальном закрытии
+      fs.unlinkSync(tempDbPath);
+    }
+  } catch (ex) {
+    appendAppLog(`Ошибка завершения системы бэкапов: ${ex.message}`);
+  }
+}
+
 app.whenReady().then(() => {
   ensureDataDirs();
+  InitializeBackupSystem();
   createWindow();
 
   app.on('activate', () => {
@@ -195,6 +303,10 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  FinalizeBackupSystem();
 });
 
 // ─── IPC Handlers ────────────────────────────────────────────────────────────

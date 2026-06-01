@@ -2,6 +2,7 @@ node_modules/
 .gitnexus/
 dist/
 release/
+dist-release/
 release-*/
 *.log
 .env

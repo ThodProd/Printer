@@ -1,7 +1,7 @@
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
 import {
-  Package, Plus, Edit2, X, Search, Download, Barcode as BarcodeIcon,
+  Package, Plus, Edit2, X, Search, Download, Upload, Barcode as BarcodeIcon,
   Tag, CheckCircle2, AlertCircle,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
@@ -9,7 +9,7 @@ import { NewCartridge } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
-import { ConfirmModal } from './ConfirmModal';
+import { ConfirmModal, AlertModal } from './ConfirmModal';
 
 const EMPTY: Omit<NewCartridge, 'id' | 'registrationDate'> = {
   model: '',
@@ -19,13 +19,86 @@ const EMPTY: Omit<NewCartridge, 'id' | 'registrationDate'> = {
   location: '',
 };
 
+/** Подсказки с прокруткой вместо нативного datalist (в Electron список может разъезжаться на всю высоту). */
+const SuggestionTextInput: React.FC<{
+  value: string;
+  onChange: (v: string) => void;
+  suggestions: string[];
+  placeholder?: string;
+  required?: boolean;
+}> = ({ value, onChange, suggestions, placeholder, required }) => {
+  const [open, setOpen] = useState(false);
+  const filtered = useMemo(() => {
+    const q = value.trim().toLowerCase();
+    const base = q ? suggestions.filter(s => s.toLowerCase().includes(q)) : suggestions;
+    return base.slice(0, 200);
+  }, [value, suggestions]);
+
+  return (
+    <div className="relative">
+      <input
+        required={required}
+        type="text"
+        className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+        value={value}
+        placeholder={placeholder}
+        onChange={e => {
+          onChange(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => {
+          window.setTimeout(() => setOpen(false), 150);
+        }}
+        autoComplete="off"
+      />
+      {open && filtered.length > 0 && (
+        <ul
+          role="listbox"
+          className="absolute left-0 right-0 z-[60] mt-1 max-h-48 overflow-y-auto rounded-lg border border-gray-200 bg-white py-1 text-sm shadow-lg"
+        >
+          {filtered.map(s => (
+            <li key={s}>
+              <button
+                type="button"
+                className="w-full px-3 py-1.5 text-left hover:bg-gray-100"
+                onMouseDown={e => {
+                  e.preventDefault();
+                  onChange(s);
+                  setOpen(false);
+                }}
+              >
+                {s}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+};
+
 const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [editItem, setEditItem] = useState<NewCartridge | null>(null);
   const [form, setForm] = useState<Omit<NewCartridge, 'id' | 'registrationDate'>>(EMPTY);
   const [search, setSearch] = useStickyState('search_new_cartridges', '');
   const [printStatus, setPrintStatus] = useState<{ id: string; text: string; ok: boolean } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
+  const [alertModal, setAlertModal] = useState<{ message: string; variant?: 'info' | 'error' | 'success' } | null>(
+    null,
+  );
+
+  /** После нативного диалога выбора файла / alert в Electron фокус может «залипать» — возвращаем в поле поиска (как на вкладке Принтеры). */
+  const scheduleFocusSearch = useCallback(() => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        searchInputRef.current?.focus({ preventScroll: true });
+      });
+    });
+  }, []);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -128,6 +201,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
         store.removeNewCartridge(idToDelete);
         setShowAdd(false);
         setConfirmModal(null);
+        scheduleFocusSearch();
       },
     });
   };
@@ -142,12 +216,6 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       return;
     }
     const template = getTemplate(store.settings);
-    const vendorTrim = item.vendor?.trim() ?? '';
-    const printerForFw = vendorTrim
-      ? store.printers.find(
-          p => p.model.trim().toLowerCase() === vendorTrim.toLowerCase(),
-        )
-      : undefined;
     const tspl = buildTSPLLabel(template, store.settings, {
       id: item.id,
       inv: '',
@@ -159,7 +227,6 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       vendor: item.vendor ?? '',
       status: 'Новый на складе',
       consumableType: 'Новый картридж',
-      firmwareFlashed: printerForFw?.firmwareFlashed === true,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus({
@@ -178,12 +245,89 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       'Модель принтера': c.vendor ?? '',
       'Место хранения': c.location ?? '',
       'Описание': c.description ?? '',
-      'Дата регистрации': new Date(c.registrationDate).toLocaleDateString('ru-RU'),
+      'Дата регистрации': new Date(c.registrationDate).toLocaleString('ru-RU'),
+      'Дата регистрации (ISO)': c.registrationDate,
     }));
     const ws = XLSX.utils.json_to_sheet(data);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Новые картриджи');
     XLSX.writeFile(wb, `new_cartridges_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    importInputRef.current?.blur();
+
+    let buf: ArrayBuffer;
+    try {
+      buf = await file.arrayBuffer();
+    } catch {
+      setAlertModal({ message: 'Не удалось прочитать файл.', variant: 'error' });
+      return;
+    }
+
+    const wb = XLSX.read(buf, { type: 'array' });
+    const sheetName = wb.SheetNames[0];
+    if (!sheetName) {
+      setAlertModal({ message: 'В файле нет листов.', variant: 'error' });
+      return;
+    }
+
+    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(wb.Sheets[sheetName], { defval: '' });
+    const existingIds = new Set(store.newCartridges.map(c => c.id));
+    let added = 0;
+    let updated = 0;
+
+    for (const row of rows) {
+      const model = String(row['Модель'] ?? '').trim();
+      if (!model) continue;
+
+      const idRaw = String(row['ID'] ?? '').trim();
+      const qtyNum = Number(row['Количество']);
+      const quantity = Number.isFinite(qtyNum) && qtyNum > 0 ? Math.floor(qtyNum) : 1;
+
+      const iso = String(row['Дата регистрации (ISO)'] ?? '').trim();
+      const registrationDate =
+        iso && !Number.isNaN(Date.parse(iso)) ? new Date(iso).toISOString() : new Date().toISOString();
+
+      const vendor = String(row['Модель принтера'] ?? '').trim() || undefined;
+      const location = String(row['Место хранения'] ?? '').trim() || undefined;
+      const description = String(row['Описание'] ?? '').trim() || undefined;
+
+      if (idRaw && existingIds.has(idRaw)) {
+        store.updateNewCartridge(idRaw, {
+          model,
+          quantity,
+          vendor,
+          description,
+          location,
+        });
+        updated++;
+        continue;
+      }
+
+      const id = idRaw && !existingIds.has(idRaw) ? idRaw : store.generateNewCartridgeId();
+      existingIds.add(id);
+
+      store.addNewCartridge({
+        id,
+        model,
+        quantity,
+        vendor,
+        description,
+        location,
+        registrationDate,
+      });
+      added++;
+    }
+
+    setAlertModal({
+      message: `Импорт завершён: добавлено ${added}, обновлено ${updated}.`,
+      variant: 'success',
+    });
   };
 
   const totalQty = filteredItems.reduce((sum, c) => sum + c.quantity, 0);
@@ -202,7 +346,23 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
           </div>
         </div>
         <div className="flex items-center space-x-2">
+          <input
+            ref={importInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            className="hidden"
+            onChange={handleImportFile}
+          />
           <button
+            type="button"
+            onClick={() => importInputRef.current?.click()}
+            className="flex items-center space-x-2 px-3 py-2 border rounded-lg text-sm hover:bg-gray-50 text-gray-600"
+          >
+            <Upload size={14} />
+            <span>Импорт</span>
+          </button>
+          <button
+            type="button"
             onClick={exportToExcel}
             className="flex items-center space-x-2 px-3 py-2 border rounded-lg text-sm hover:bg-gray-50 text-gray-600"
           >
@@ -223,6 +383,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       <div className="relative max-w-sm">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
         <input
+          ref={searchInputRef}
           type="text"
           value={search}
           onChange={e => setSearch(e.target.value)}
@@ -361,46 +522,44 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
             )}
 
             <form onSubmit={handleSave} className="space-y-3">
-              {[
-                { key: 'model', label: 'Модель *', placeholder: 'CF283A', type: 'text', required: true, list: 'new-cartridge-model-suggestions' },
-                { key: 'vendor', label: 'Модель принтера', placeholder: 'Например: Samsung ProXpress M4020ND', type: 'text', list: 'printer-model-suggestions' },
-                { key: 'location', label: 'Место хранения', placeholder: 'Стеллаж A-3', type: 'text', list: 'location-suggestions' },
-                { key: 'description', label: 'Описание', placeholder: 'Совместимый, оригинал...', type: 'text' },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-xs text-gray-500 block mb-1">{f.label}</label>
-                  <input
-                    required={f.required}
-                    type={f.type}
-                    list={f.list}
-                    placeholder={f.placeholder}
-                    className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                    value={(form as Record<string, string | number>)[f.key] as string}
-                    onChange={e => setForm({ ...form, [f.key]: e.target.value })}
-                  />
-                  {f.key === 'vendor' && (
-                    <datalist id="printer-model-suggestions">
-                      {printerModelSuggestions.map(model => (
-                        <option key={model} value={model} />
-                      ))}
-                    </datalist>
-                  )}
-                  {f.key === 'model' && (
-                    <datalist id="new-cartridge-model-suggestions">
-                      {cartridgeModelSuggestions.map(model => (
-                        <option key={model} value={model} />
-                      ))}
-                    </datalist>
-                  )}
-                  {f.key === 'location' && (
-                    <datalist id="location-suggestions">
-                      {locationSuggestions.map(location => (
-                        <option key={location} value={location} />
-                      ))}
-                    </datalist>
-                  )}
-                </div>
-              ))}
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Модель *</label>
+                <SuggestionTextInput
+                  required
+                  value={form.model}
+                  onChange={v => setForm({ ...form, model: v })}
+                  suggestions={cartridgeModelSuggestions}
+                  placeholder="CF283A"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Модель принтера</label>
+                <SuggestionTextInput
+                  value={form.vendor ?? ''}
+                  onChange={v => setForm({ ...form, vendor: v })}
+                  suggestions={printerModelSuggestions}
+                  placeholder="Например: Samsung ProXpress M4020ND"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Место хранения</label>
+                <SuggestionTextInput
+                  value={form.location ?? ''}
+                  onChange={v => setForm({ ...form, location: v })}
+                  suggestions={locationSuggestions}
+                  placeholder="Стеллаж A-3"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 block mb-1">Описание</label>
+                <input
+                  type="text"
+                  placeholder="Совместимый, оригинал..."
+                  className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                  value={form.description ?? ''}
+                  onChange={e => setForm({ ...form, description: e.target.value })}
+                />
+              </div>
 
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Количество *</label>
@@ -439,7 +598,20 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
           message={confirmModal.message}
           dangerous
           onConfirm={confirmModal.onConfirm}
-          onCancel={() => setConfirmModal(null)}
+          onCancel={() => {
+            setConfirmModal(null);
+            scheduleFocusSearch();
+          }}
+        />
+      )}
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => {
+            setAlertModal(null);
+            scheduleFocusSearch();
+          }}
         />
       )}
     </div>

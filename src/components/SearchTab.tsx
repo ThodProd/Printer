@@ -95,7 +95,6 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       balanceCost: printer?.balanceCost ?? '',
       consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cartridge.status],
-      firmwareFlashed: !!printer?.firmwareFlashed,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus(res.success

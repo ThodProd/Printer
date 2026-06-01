@@ -122,12 +122,26 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
             showCenterNotice(`Принтер ${scannedPrinter.inventoryNumber} уже готов к выдаче`);
             return;
           }
-          const isInSentBatch = store.batches.some(
+          const inLegacySent = store.batches.some(
             b =>
               b.status === 'sent' &&
-              (b.items?.some(i => i.kind === 'printer' && i.printerInventoryNumber === scannedPrinter.inventoryNumber) ??
-                b.cartridgeIds.includes(scannedPrinter.inventoryNumber)),
+              ((b.items?.some(
+                i => i.kind === 'printer' && i.printerInventoryNumber === scannedPrinter.inventoryNumber,
+              ) ??
+                false) ||
+                (b.cartridgeIds?.includes(scannedPrinter.inventoryNumber) ?? false)),
           );
+          const inWarehouseSent = store.warehouseLedger.shipmentBatches.some(
+            b =>
+              b.status === 'sent' &&
+              b.items.some(
+                it =>
+                  it.type === 'Устройство' &&
+                  it.repairId === activeRepair.id &&
+                  it.status === 'at_refill',
+              ),
+          );
+          const isInSentBatch = inLegacySent || inWarehouseSent;
           if (!isInSentBatch || activeRepair.locationStatus !== 'at_refill') {
             showCenterNotice(`Принтер ${scannedPrinter.inventoryNumber} не находится в "На заправке — партии"`);
             return;
@@ -159,6 +173,10 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
             action: 'Принтер получен с ремонта (сканер)',
             is_technical: false,
           });
+          store.applyWarehouseReceiveForPrinterFromDashboard(
+            activeRepair.id,
+            scannedPrinter.programId ?? scannedPrinter.inventoryNumber,
+          );
           setMessage({ text: `✓ Устройство готово к выдаче: ${scannedPrinter.inventoryNumber}`, type: 'success' });
           addOp(`Готово к выдаче: ${scannedPrinter.inventoryNumber}`, true);
           return;
@@ -205,10 +223,33 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         showCenterNotice(`${cartridge.id} имеет статус "Готов к выдаче"`);
         return;
       }
+      if (cartridge.status === 'at_refill') {
+        showCenterNotice(`${cartridge.id} на заправке — используйте режим «Прием с заправки».`);
+        return;
+      }
+    }
+
+    if (mode === 'return') {
+      if (cartridge.status !== 'received_from_refill' && cartridge.status !== 'ready') {
+        if (cartridge.status === 'on_hand') {
+          showCenterNotice(`${cartridge.id} уже на руках.`);
+        } else {
+          showCenterNotice(`Нельзя выдать — статус: ${STATUS_LABELS[cartridge.status]}.`);
+        }
+        addOp(cartridge.status === 'on_hand' ? `Уже на руках: ${cartridge.id}` : `Нельзя выдать: ${cartridge.id}`, false);
+        return;
+      }
     }
 
     if (mode === 'receive_refill' && (cartridge.status === 'received_from_refill' || cartridge.status === 'ready')) {
       showCenterNotice(`${cartridge.id} уже в статусе "Готов к выдаче"`);
+      return;
+    }
+
+    if (mode === 'receive_refill' && !fastReceiveMode && cartridge.status !== 'at_refill') {
+      setCenterNotice(`${cartridge.id} не на заправке (статус: ${STATUS_LABELS[cartridge.status]}).`);
+      window.setTimeout(() => setCenterNotice(null), 2200);
+      addOp(`Не на заправке: ${cartridge.id}`, false);
       return;
     }
 
@@ -220,6 +261,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         return;
       }
       store.updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Принят с заправки (быстрый режим)');
+      store.applyWarehouseReceiveForCartridgeFromDashboard(cartridge.id);
       const fastPrinter = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
       store.addRefillLog({
         id: Math.random().toString(36).substr(2, 9),
@@ -307,6 +349,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         addOp(`Не на заправке: ${cartridge.id}`, false);
       } else {
         store.updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Принят с заправки');
+        store.applyWarehouseReceiveForCartridgeFromDashboard(cartridge.id);
         const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
         store.addRefillLog({
           id: Math.random().toString(36).substr(2, 9),
@@ -359,6 +402,10 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           action: employee ? `Картридж выдан сотруднику ${employee}` : 'Картридж выдан пользователю',
           is_technical: false,
         });
+        store.applyWarehouseIssueSnapshotFromDashboard(
+          [cartridge.id],
+          employee ?? cartridge.lastSubmittedBy ?? 'Сотрудник',
+        );
         setMessage({ text: `✓ Выдан: ${cartridge.id}`, type: 'success' });
         addOp(`Выдан: ${cartridge.id}${employee ? ` (${employee})` : ''}`, true);
       } else if (cartridge.status === 'on_hand') {
@@ -465,6 +512,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       action: employee ? `Принтер выдан сотруднику ${employee}` : 'Принтер выдан пользователю',
       is_technical: false,
     });
+    const deviceRowId = printerReturn.printer.programId ?? printerReturn.printer.inventoryNumber;
+    const linkedCartIds = store.cartridges
+      .filter(c => c.linkedRepairId === printerReturn.repairId)
+      .map(c => c.id);
+    store.applyWarehouseIssueSnapshotFromDashboard(
+      [deviceRowId, ...linkedCartIds],
+      employee ?? printerReturn.printer.boss ?? 'Сотрудник',
+    );
     setMessage({ text: `✓ Выдан принтер: ${printerReturn.printer.inventoryNumber}`, type: 'success' });
     addOp(`Выдан принтер: ${printerReturn.printer.inventoryNumber}`, true);
     setPrinterReturn(null);
@@ -517,6 +572,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       isReplaced: false,
       refillCount: 1,
       registrationDate: now,
+      lastSubmittedBy: newForm.boss?.trim() || undefined,
     };
 
     store.addCartridge(cartridge);
@@ -553,7 +609,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         balanceCost: printerExists?.balanceCost ?? '',
         consumableType: 'Картридж',
         status: STATUS_LABELS.waiting,
-        firmwareFlashed: !!printerExists?.firmwareFlashed,
       });
       window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     }
@@ -831,7 +886,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
                       balanceCost: printer?.balanceCost ?? '',
                       consumableType: infoCard.cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
                       status: STATUS_LABELS[infoCard.cartridge.status],
-                      firmwareFlashed: !!printer?.firmwareFlashed,
                     });
                     await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
                   }}

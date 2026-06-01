@@ -10,6 +10,11 @@ import {
 import { AppSettings, DEFAULT_SETTINGS, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
 import { buildMemoryResetTSPL } from '../utils/tspl';
+import { mergeLedgerWithStore } from '../utils/warehouseStoreBridge';
+import {
+  warehouseItemsToExcelRows,
+  warehouseShipmentBatchToExcelRows,
+} from '../utils/excelWarehouseExport';
 import LabelEditorTab from './LabelEditorTab';
 import { ConfirmModal, AlertModal } from './ConfirmModal';
 
@@ -184,36 +189,120 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
 
   const handleExportFullDatabase = () => {
     const printersSheet = store.printers.map(p => ({
-      'ID': p.programId ?? '',
+      'ID программы': p.programId ?? '',
       'Инв. №': p.inventoryNumber,
-      'Модель': p.model,
-      'Тип': p.printerType,
-      'Подразделение': p.department,
+      Модель: p.model,
+      Тип: p.printerType,
+      Подразделение: p.department,
       'Мат. ответственный': p.boss,
       'Дата ввода': p.commissionDate,
       'Стоимость': p.balanceCost,
       'Модели расходников': p.cartridgeModels.join(', '),
+      'Прошит': p.firmwareFlashed ? 'Да' : 'Нет',
+      'Счётчик заправок (устр.)': p.refillCount ?? '',
+      'Счётчик ремонтов': p.repairCount ?? '',
+      'Слот К (последний №)': p.consumableCartridgeSeq ?? '',
+      'Слот Д (последний №)': p.consumableDrumSeq ?? '',
     }));
     const cartridgesSheet = store.cartridges.map(c => {
       const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
       return {
         'ID': c.id,
-        'Штрихкод': c.barcode,
-        'Модель': c.model,
-        'Тип': c.consumableType === 'drum' ? 'Драм' : 'Картридж',
-        'Цвет': c.color ?? '',
-        'Статус': STATUS_LABELS[c.status] ?? c.status,
-        'Заправок': c.refillCount,
+        Штрихкод: c.barcode,
+        Модель: c.model,
+        Тип: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
+        Цвет: c.color ?? '',
+        'Статус (код)': c.status,
+        Статус: STATUS_LABELS[c.status] ?? c.status,
+        Заправок: c.refillCount,
         'Принтер (инв.)': c.printerInventoryNumber,
+        'Принтер (ID)': printer?.programId ?? '',
         'Принтер (модель)': printer?.model ?? '',
-        'Подразделение': printer?.department ?? '',
+        Подразделение: printer?.department ?? '',
         'Кто сдал': c.lastSubmittedBy ?? '',
-        'Дата регистрации': new Date(c.registrationDate).toLocaleDateString('ru-RU'),
+        'Слот у принтера': c.consumableSlot ?? '',
+        'Связанный ремонт (ID)': c.linkedRepairId ?? '',
+        Заменён: c.isReplaced ? 'Да' : 'Нет',
+        'Замена (ID)': c.replacedById ?? '',
+        'Дата регистрации': new Date(c.registrationDate).toLocaleString('ru-RU'),
+        'Дата регистрации (ISO)': c.registrationDate,
+        'Записей в истории': c.history?.length ?? 0,
       };
     });
+
+    const repairsSheet = store.repairs.map(r => ({
+      'ID заявки': r.id,
+      'Инв. принтера': r.printerInventoryNumber,
+      Дата: new Date(r.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': r.date,
+      'Дата завершения': r.completionDate
+        ? new Date(r.completionDate).toLocaleString('ru-RU')
+        : '—',
+      'Дата завершения (ISO)': r.completionDate ?? '—',
+      Причина: r.reason,
+      Описание: r.repairDescription ?? '—',
+      'Статус (код)': r.status,
+      Комментарий: r.comment ?? '—',
+      Мастер: r.technician ?? '—',
+      'Размещение (код)': r.locationStatus ?? '—',
+    }));
+
+    const refillLogSheet = store.refillLog.map(e => ({
+      'ID записи': e.id,
+      Дата: new Date(e.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': e.date,
+      'ID в журнале': e.cartridgeId,
+      Модель: e.cartridgeModel,
+      'Тип расходника': e.consumableType,
+      'Тип устройства': e.deviceType ?? '—',
+      'Вид услуги': e.serviceType ?? '—',
+      Действие: e.action,
+      'Инв. принтера': e.printerInventoryNumber,
+      'Модель принтера': e.printerModel,
+      Подразделение: e.department ?? '—',
+      Сотрудник: e.employee ?? '—',
+      'Техническая': e.is_technical ? 'Да' : 'Нет',
+    }));
+
+    const mergedWarehouseItems = mergeLedgerWithStore(
+      store.warehouseLedger,
+      store.cartridges,
+      store.repairs,
+      store.printers,
+    );
+    const warehouseItemsSheet = warehouseItemsToExcelRows(mergedWarehouseItems);
+
+    const warehouseBatchesRows: Record<string, string | number>[] = [];
+    for (const b of store.warehouseLedger.shipmentBatches) {
+      warehouseBatchesRows.push(...warehouseShipmentBatchToExcelRows(b));
+    }
+
+    const auditSheet = store.warehouseLedger.auditLogs.map(a => ({
+      'ID': a.id,
+      Дата: new Date(a.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': a.date,
+      Действие: a.action,
+      Детали: a.details,
+      Пользователь: a.user ?? '—',
+      Тип: a.type,
+    }));
+
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(printersSheet), 'Принтеры');
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cartridgesSheet), 'Расходники');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(repairsSheet), 'Ремонт');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(refillLogSheet), 'Журнал');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(warehouseItemsSheet), 'Склад позиции');
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        warehouseBatchesRows.length > 0
+          ? warehouseBatchesRows
+          : [{ Примечание: 'Нет партий в реестре склада' }],
+      ),
+      'Склад партии',
+    );
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(auditSheet), 'Склад аудит');
     XLSX.writeFile(wb, `database_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
   };
 
@@ -225,6 +314,7 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
       repairs: store.repairs,
       batches: store.batches,
       refillLog: store.refillLog,
+      warehouseLedger: store.warehouseLedger,
       warehouses: {
         waiting: store.cartridges.filter(c => c.status === 'waiting'),
         atRefill: store.cartridges.filter(c => c.status === 'at_refill'),
@@ -695,7 +785,7 @@ const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ s
             <div className="text-sm text-blue-700 space-y-1">
               <div><strong>Cartridge Control</strong> — система учёта картриджей</div>
               <div>Версия: <strong>1</strong></div>
-              <div>Создатель: <strong>Спиркин В.А.</strong></div>
+              <div>Создатель: <strong>Спиркин В.А., г. Арсеньев</strong></div>
             </div>
           </div>
         </div>

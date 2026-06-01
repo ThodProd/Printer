@@ -1,5 +1,5 @@
 
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   Save, RotateCcw, Plus, Trash2, ZoomIn, ZoomOut,
   AlignLeft, Info, Copy,
@@ -13,7 +13,7 @@ import {
   AppSettings,
 } from '../types';
 import { StoreType } from '../store';
-import { buildTSPLLabel, DOTS_PER_MM } from '../utils/tspl';
+import { buildTSPLLabel, DOTS_PER_MM, resolveContent, type LabelData } from '../utils/tspl';
 
 /**
  * Screen scale at 96 DPI: 96/25.4 ≈ 3.78 px/mm.
@@ -55,9 +55,34 @@ const VARIABLE_TAGS = [
   { tag: '{description}', label: 'Описание' },
   { tag: '{vendor}', label: 'Модель принтера для новых картриджей' },
   { tag: '{date}', label: 'Дата' },
-  { tag: '{fw}', label: 'Метка «прошит» у принтера (П или пусто)' },
+  { tag: '{fw}', label: 'Метка «прошит» у принтера (слово «Прошит» или пусто)' },
   { tag: '{firmware}', label: 'То же, что {fw}' },
 ];
+
+type LabelPreviewScenario = 'printer_flashed' | 'printer_plain' | 'cartridge';
+
+function makePreviewLabelData(scenario: LabelPreviewScenario): LabelData {
+  return {
+    id: TEST_ID,
+    inv: TEST_INV,
+    printerModel: TEST_MODEL,
+    cartModel: TEST_CART_MODEL,
+    fio: TEST_FIO,
+    boss: TEST_FIO,
+    employee: TEST_FIO,
+    department: TEST_DEPARTMENT,
+    printerType: TEST_PRINTER_TYPE,
+    commissionDate: TEST_COMMISSION_DATE,
+    balanceCost: TEST_BALANCE_COST,
+    consumableType: 'Картридж',
+    status: 'На руках',
+    quantity: '1',
+    location: 'Склад',
+    description: 'Описание',
+    vendor: TEST_MODEL,
+    firmwareFlashed: scenario === 'printer_flashed',
+  };
+}
 
 const FONT_OPTIONS = [
   { value: '1', label: '1 (5×12)' },
@@ -67,31 +92,6 @@ const FONT_OPTIONS = [
   { value: '5', label: '5 (16×32)' },
   { value: '0', label: '0 (8×8)' },
 ];
-
-function resolveContent(tpl: string): string {
-  return tpl
-    .replace(/\{id\}/g, TEST_ID)
-    .replace(/\{inv\}/g, TEST_INV)
-    .replace(/\{model\}/g, TEST_MODEL)
-    .replace(/\{printerModel\}/g, TEST_MODEL)
-    .replace(/\{cartModel\}/g, TEST_CART_MODEL)
-    .replace(/\{fio\}/g, TEST_FIO)
-    .replace(/\{boss\}/g, TEST_FIO)
-    .replace(/\{employee\}/g, TEST_FIO)
-    .replace(/\{department\}/g, TEST_DEPARTMENT)
-    .replace(/\{printerType\}/g, TEST_PRINTER_TYPE)
-    .replace(/\{commissionDate\}/g, TEST_COMMISSION_DATE)
-    .replace(/\{balanceCost\}/g, TEST_BALANCE_COST)
-    .replace(/\{consumableType\}/g, 'Картридж')
-    .replace(/\{status\}/g, 'На руках')
-    .replace(/\{quantity\}/g, '1')
-    .replace(/\{location\}/g, 'Склад')
-    .replace(/\{description\}/g, 'Описание')
-    .replace(/\{vendor\}/g, TEST_MODEL)
-    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
-    .replace(/\{fw\}/g, 'П')
-    .replace(/\{firmware\}/g, 'П');
-}
 
 function parseTsplToTemplate(tspl: string, fallback: LabelTemplate): LabelTemplate {
   const lines = tspl.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
@@ -189,6 +189,11 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [saved, setSaved] = useState(false);
   const [canvasZoom, setCanvasZoom] = useState(2);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const [labelPreviewScenario, setLabelPreviewScenario] = useState<LabelPreviewScenario>('printer_flashed');
+  const previewLabelData = useMemo(
+    () => makePreviewLabelData(labelPreviewScenario),
+    [labelPreviewScenario],
+  );
 
   const buildEditorTspl = (nextTemplate: LabelTemplate) =>
     buildTSPLLabel(
@@ -212,7 +217,6 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
         location: '{location}',
         description: '{description}',
         vendor: '{vendor}',
-        firmwareFlashed: true,
       },
       { ignoreCustomTspl: true },
     );
@@ -351,7 +355,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   const renderElPreview = (el: LabelElement) => {
-    const content = resolveContent(el.content);
+    const content = resolveContent(el.content, previewLabelData);
     const style: React.CSSProperties = {
       position: 'absolute',
       left:   el.x      * dotScale,
@@ -704,6 +708,19 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
               </div>
             </div>
 
+            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-gray-600">
+              <span className="font-medium shrink-0">Превью {'{fw}'}:</span>
+              <select
+                value={labelPreviewScenario}
+                onChange={e => setLabelPreviewScenario(e.target.value as LabelPreviewScenario)}
+                className="border border-gray-200 rounded-lg px-2 py-1 text-xs bg-white max-w-full"
+              >
+                <option value="printer_flashed">Принтер, отмечен «прошит»</option>
+                <option value="printer_plain">Принтер, без отметки</option>
+                <option value="cartridge">Этикетка картриджа (пусто)</option>
+              </select>
+            </div>
+
             <div className="overflow-auto rounded border border-gray-200 bg-gray-50 p-2">
               <div
                 ref={canvasRef}
@@ -772,7 +789,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
               className="w-full h-full min-h-56 p-3 bg-gray-950 border border-gray-700 rounded-lg text-green-400 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-blue-500 resize-none"
             />
             <p className="text-gray-500 text-[11px] font-sans">
-              Это единственный шаблон этикетки. Что сохранено здесь, то отправляется на печать. Для переменных используйте {`{id}`}, {`{inv}`}, {`{model}`}, {`{cartModel}`}, {`{date}`}.
+              Это единственный шаблон этикетки. Что сохранено здесь, то отправляется на печать. Для переменных используйте {`{id}`}, {`{inv}`}, {`{model}`}, {`{cartModel}`}, {`{date}`}, {`{fw}`}/{`{firmware}`} (только для этикетки принтера — «Прошит» если отмечено в карточке; на этикетке картриджа всегда пусто).
             </p>
           </div>
         </div>

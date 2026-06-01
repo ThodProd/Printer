@@ -1,5 +1,5 @@
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
 import {
   Search,
   Printer as PrinterIcon,
@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useStore } from './store';
+import { mergeLedgerWithStore } from './utils/warehouseStoreBridge';
 
 import Dashboard from './components/Dashboard';
 import SearchTab from './components/SearchTab';
@@ -26,6 +27,7 @@ import PrintingTab from './components/PrintingTab';
 import SettingsTab from './components/SettingsTab';
 import RefillLogTab from './components/RefillLogTab';
 import NewCartridgesTab from './components/NewCartridgesTab';
+import type { WarehouseFocusRequest } from './components/WarehouseInventoryPanel';
 
 /** Main navigation tabs in order */
 const MAIN_TABS = [
@@ -88,6 +90,9 @@ const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [settingsSubTab, setSettingsSubTab] = useState('printer');
   const [showAbout, setShowAbout] = useState(false);
+  const [warehouseFocusRequest, setWarehouseFocusRequest] = useState<WarehouseFocusRequest | null>(
+    null,
+  );
   const scanBufferRef = useRef('');
   const lastScanKeyRef = useRef(0);
 
@@ -127,12 +132,25 @@ const App: React.FC = () => {
     setActiveTab('settings');
   };
 
+  const focusWarehouseSection = useCallback((section: WarehouseFocusRequest['section']) => {
+    setWarehouseFocusRequest({ section, tick: Date.now() });
+  }, []);
+
+  const clearWarehouseFocus = useCallback(() => setWarehouseFocusRequest(null), []);
+
   const renderContent = () => {
     switch (activeTab) {
       case 'dashboard':      return <Dashboard store={store} onNavigate={setActiveTab} />;
       case 'newcartridges':  return <NewCartridgesTab store={store} />;
       case 'search':         return <SearchTab store={store} />;
-      case 'inventory':      return <InventoryTab store={store} />;
+      case 'inventory':
+        return (
+          <InventoryTab
+            store={store}
+            warehouseFocusRequest={warehouseFocusRequest}
+            onWarehouseFocusHandled={clearWarehouseFocus}
+          />
+        );
       case 'printers':       return <PrintersTab store={store} />;
       case 'repair':         return <RepairTab store={store} />;
       case 'printing':       return <PrintingTab store={store} />;
@@ -143,9 +161,25 @@ const App: React.FC = () => {
     }
   };
 
-  const waiting  = store.cartridges.filter(c => c.status === 'waiting').length;
-  const atRefill = store.cartridges.filter(c => c.status === 'at_refill').length;
-  const repairs  = store.repairs.filter(r => r.status === 'in_repair' || r.status === 'waiting').length;
+  const mergedWarehouse = useMemo(
+    () =>
+      mergeLedgerWithStore(
+        store.warehouseLedger,
+        store.cartridges,
+        store.repairs,
+        store.printers,
+      ),
+    [store.warehouseLedger, store.cartridges, store.repairs, store.printers],
+  );
+
+  const waiting = mergedWarehouse.filter(i => i.status === 'waiting').length;
+  const atRefill = mergedWarehouse.filter(i => i.status === 'at_refill').length;
+  const readyToIssue = mergedWarehouse.filter(i => i.status === 'ready').length;
+  const repairs = store.repairs.filter(
+    r =>
+      r.locationStatus !== 'issued' &&
+      (r.status === 'in_repair' || r.status === 'waiting'),
+  ).length;
 
   const NavButton = ({ tab }: { tab: { id: string; label: string; icon: React.ReactNode } }) => (
     <button
@@ -173,46 +207,88 @@ const App: React.FC = () => {
             <p className="text-xs opacity-60 leading-tight">Система учёта картриджей v1</p>
           </div>
         </div>
-        <div className="flex items-center space-x-3 text-sm">
-          {waiting > 0 && (
-            <div className="bg-yellow-400 text-yellow-900 px-2.5 py-1 rounded-full text-xs font-bold">
-              ⏳ {waiting} ожидают
-            </div>
-          )}
-          {atRefill > 0 && (
-            <div className="bg-purple-400 text-white px-2.5 py-1 rounded-full text-xs font-bold">
-              🔄 {atRefill} на заправке
-            </div>
-          )}
-          {repairs > 0 && (
-            <div className="bg-orange-400 text-white px-2.5 py-1 rounded-full text-xs font-bold">
-              🔧 {repairs} в ремонте
-            </div>
-          )}
-          {store.settings.labelPrinterName ? (
+        <div className="flex flex-col items-end gap-1 shrink-0 min-w-0">
+          <div className="flex items-center space-x-3 text-sm flex-wrap justify-end gap-y-1">
+            {waiting > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('inventory');
+                  focusWarehouseSection('waiting');
+                }}
+                className="bg-[#e9dcc0] text-[#3d3420] border border-[#cfc2a3] px-2.5 py-1 rounded-full text-xs font-bold hover:brightness-95 active:brightness-90 cursor-pointer"
+                title="Открыть склад: ожидают отправки"
+              >
+                ⏳ {waiting} ожидают
+              </button>
+            )}
+            {atRefill > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('inventory');
+                  focusWarehouseSection('at_refill');
+                }}
+                className="bg-purple-400 text-white px-2.5 py-1 rounded-full text-xs font-bold hover:bg-purple-500 active:bg-purple-600 cursor-pointer"
+                title="Открыть склад: на заправке"
+              >
+                🔄 {atRefill} на заправке
+              </button>
+            )}
+            {readyToIssue > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('inventory');
+                  focusWarehouseSection('ready');
+                }}
+                className="bg-emerald-500 hover:bg-emerald-400 text-white px-2.5 py-1 rounded-full text-xs font-bold cursor-pointer border border-emerald-400/80"
+                title="Открыть склад: готовы к выдаче"
+              >
+                ✓ {readyToIssue} к выдаче
+              </button>
+            )}
+            {repairs > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  setWarehouseFocusRequest(null);
+                  setActiveTab('repair');
+                }}
+                className="bg-orange-50 text-orange-800 border border-orange-200/90 px-2.5 py-1 rounded-full text-xs font-semibold hover:bg-orange-100/80 active:bg-orange-100 cursor-pointer"
+                title="Открыть вкладку ремонта"
+              >
+                🔧 {repairs} в ремонте
+              </button>
+            )}
+            {store.settings.labelPrinterName ? (
+              <button
+                type="button"
+                onClick={openPrinterSettings}
+                className="bg-green-600 hover:bg-green-500 text-white px-2.5 py-1 rounded-full text-xs font-bold"
+                title="Открыть настройки принтера"
+              >
+                🖨 {store.settings.labelPrinterName}
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={openPrinterSettings}
+                className="bg-orange-500 hover:bg-orange-400 text-white px-2.5 py-1 rounded-full text-xs font-bold"
+                title="Настроить принтер"
+              >
+                ⚠ Принтер не выбран
+              </button>
+            )}
             <button
-              onClick={openPrinterSettings}
-              className="bg-green-600 hover:bg-green-500 text-white px-2.5 py-1 rounded-full text-xs font-bold"
-              title="Открыть настройки принтера"
+              type="button"
+              onClick={() => setShowAbout(true)}
+              className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded-full text-xs"
+              title="О программе"
             >
-              🖨 {store.settings.labelPrinterName}
+              <Info size={14} />
             </button>
-          ) : (
-            <button
-              onClick={openPrinterSettings}
-              className="bg-orange-500 hover:bg-orange-400 text-white px-2.5 py-1 rounded-full text-xs font-bold"
-              title="Настроить принтер"
-            >
-              ⚠ Принтер не выбран
-            </button>
-          )}
-          <button
-            onClick={() => setShowAbout(true)}
-            className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-1 rounded-full text-xs"
-            title="О программе"
-          >
-            <Info size={14} />
-          </button>
+          </div>
         </div>
       </header>
 
@@ -242,8 +318,18 @@ const App: React.FC = () => {
         </nav>
 
         {/* Main Content */}
-        <main className={`flex-1 p-5 ${activeTab === 'refilllog' ? 'overflow-hidden' : 'overflow-auto'}`}>
-          {renderContent()}
+        <main
+          className={`flex-1 min-h-0 p-5 ${
+            activeTab === 'refilllog' || activeTab === 'repair'
+              ? 'overflow-hidden flex flex-col'
+              : 'overflow-auto'
+          }`}
+        >
+          {activeTab === 'refilllog' || activeTab === 'repair' ? (
+            <div className="flex-1 min-h-0 overflow-hidden flex flex-col">{renderContent()}</div>
+          ) : (
+            renderContent()
+          )}
         </main>
       </div>
 
@@ -269,7 +355,7 @@ const App: React.FC = () => {
               <div className="space-y-1.5">
                 <div className="flex justify-between">
                   <span className="text-gray-500">Создатель:</span>
-                  <span className="font-semibold">Спиркин В.А.</span>
+                  <span className="font-semibold whitespace-pre-line text-right">Спиркин В.А.{'\n'}г. Арсеньев</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-gray-500">Принтеров:</span>

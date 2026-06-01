@@ -5,92 +5,61 @@ import {
   CheckCircle2, AlertCircle, X, Barcode as BarcodeIcon, ChevronRight,
 } from 'lucide-react';
 import Barcode from 'react-barcode';
-import { Cartridge, LabelTemplate, STATUS_LABELS } from '../types';
+import { Cartridge, LabelTemplate, STATUS_LABELS, ConsumableColor } from '../types';
 import { StoreType } from '../store';
-import { buildTSPLLabel, DOTS_PER_MM, getTemplate } from '../utils/tspl';
+import { buildTSPLLabel, cleanInventoryNumber, DOTS_PER_MM, getTemplate, resolveContent, type LabelData } from '../utils/tspl';
 import { useStickyState } from '../utils/useStickyState';
 import { ConfirmModal } from './ConfirmModal';
 
 const PREVIEW_DOTS_SCALE = 0.35;
 
-function resolvePreviewContent(
-  tpl: string,
-  data: {
-    id: string;
-    inv: string;
-    cartModel?: string;
-    printerModel?: string;
-    fio?: string;
-    boss?: string;
-    employee?: string;
-    department?: string;
-    printerType?: string;
-    commissionDate?: string;
-    balanceCost?: string;
-    consumableType?: string;
-    status?: string;
-    quantity?: string | number;
-    location?: string;
-    description?: string;
-    vendor?: string;
-    firmwareFlashed?: boolean;
-  },
-): string {
-  const printerModel = data.printerModel ?? '';
-  const fio = data.fio ?? data.boss ?? data.employee ?? '';
-  const firmware = data.firmwareFlashed ? 'П' : '';
-  return tpl
-    .replace(/\{id\}/g, data.id)
-    .replace(/\{inv\}/g, data.inv)
-    .replace(/\{model\}/g, printerModel)
-    .replace(/\{printerModel\}/g, printerModel)
-    .replace(/\{cartModel\}/g, data.cartModel ?? '')
-    .replace(/\{fio\}/g, fio)
-    .replace(/\{boss\}/g, fio)
-    .replace(/\{employee\}/g, fio)
-    .replace(/\{department\}/g, data.department ?? '')
-    .replace(/\{printerType\}/g, data.printerType ?? '')
-    .replace(/\{commissionDate\}/g, data.commissionDate ?? '')
-    .replace(/\{balanceCost\}/g, data.balanceCost ?? '')
-    .replace(/\{consumableType\}/g, data.consumableType ?? '')
-    .replace(/\{status\}/g, data.status ?? '')
-    .replace(/\{quantity\}/g, String(data.quantity ?? ''))
-    .replace(/\{location\}/g, data.location ?? '')
-    .replace(/\{description\}/g, data.description ?? '')
-    .replace(/\{vendor\}/g, data.vendor ?? '')
-    .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'))
-    .replace(/\{fw\}/g, firmware)
-    .replace(/\{firmware\}/g, firmware);
+const CONSUMABLE_COLOR_UI: Array<{ id: ConsumableColor; short: string; className: string }> = [
+  { id: 'black', short: 'Ч', className: 'bg-black text-white border-black' },
+  { id: 'cyan', short: 'Г', className: 'bg-cyan-500 text-white border-cyan-500' },
+  { id: 'magenta', short: 'П', className: 'bg-fuchsia-500 text-white border-fuchsia-500' },
+  { id: 'yellow', short: 'Ж', className: 'bg-yellow-300 text-yellow-900 border-yellow-300' },
+];
+
+function ColorDot({ color }: { color?: ConsumableColor }) {
+  const cfg = CONSUMABLE_COLOR_UI.find(c => c.id === color);
+  if (!cfg) return null;
+  return (
+    <span
+      className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[9px] font-bold ${cfg.className}`}
+    >
+      {cfg.short}
+    </span>
+  );
+}
+
+/** Расходники для этикетки: у принтера, не списанные и не заменённые в базе */
+function isLabelListCartridge(c: Cartridge, printerInv: string): boolean {
+  if (cleanInventoryNumber(c.printerInventoryNumber) !== cleanInventoryNumber(printerInv)) return false;
+  if (c.isReplaced) return false;
+  if (c.status === 'disposed' || c.status === 'replaced') return false;
+  return true;
+}
+
+function consumableShortLabel(c: Cartridge, samePrinter: Cartridge[]): string {
+  const sameType = samePrinter.filter(x => x.consumableType === c.consumableType);
+  const fromSlot = c.consumableSlot;
+  const index =
+    fromSlot != null && Number.isFinite(fromSlot)
+      ? fromSlot
+      : sameType.findIndex(x => x.id === c.id) + 1;
+  const base = c.consumableType === 'drum' ? 'Драм' : 'Картридж';
+  return `${base} ${Math.max(index, 1)}`;
 }
 
 /** Render preview from the same template/settings used for printing */
 const LabelPreview: React.FC<{
   template: LabelTemplate;
-  data: {
-    id: string;
-    inv: string;
-    cartModel?: string;
-    printerModel?: string;
-    fio?: string;
-    boss?: string;
-    employee?: string;
-    department?: string;
-    printerType?: string;
-    commissionDate?: string;
-    balanceCost?: string;
-    consumableType?: string;
-    status?: string;
-    quantity?: string | number;
-    location?: string;
-    description?: string;
-    vendor?: string;
-    firmwareFlashed?: boolean;
-  };
+  data: LabelData;
 }> = ({ template, data }) => {
   const canvasW = Math.max(160, template.width * DOTS_PER_MM * PREVIEW_DOTS_SCALE);
   const canvasH = Math.max(56, template.height * DOTS_PER_MM * PREVIEW_DOTS_SCALE);
   const renderElement = (el: LabelTemplate['elements'][number]) => {
-    const content = resolvePreviewContent(el.content, data);
+    const content = resolveContent(el.content, data);
     const style: React.CSSProperties = {
       position: 'absolute',
       left: el.x * PREVIEW_DOTS_SCALE,
@@ -173,10 +142,18 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
     );
   }, [store.printers, printerSearch]);
 
-  const printerCartridges = useMemo(
-    () => store.cartridges.filter((c: Cartridge) => c.printerInventoryNumber === selectedPrinterInv && !c.isReplaced),
-    [store.cartridges, selectedPrinterInv],
-  );
+  const printerCartridges = useMemo(() => {
+    if (!selectedPrinterInv) return [];
+    const raw = store.cartridges.filter(c => isLabelListCartridge(c, selectedPrinterInv));
+    /** Все строки (в т.ч. при дублирующихся ID в старых данных — иначе цветные картриджи «слипаются») */
+    return raw.sort((a, b) => {
+      const sa = a.consumableSlot ?? 9999;
+      const sb = b.consumableSlot ?? 9999;
+      if (sa !== sb) return sa - sb;
+      const col = (x: Cartridge) => (x.color ? `${x.color}:${x.id}` : x.id);
+      return col(a).localeCompare(col(b), 'ru');
+    });
+  }, [store.cartridges, selectedPrinterInv]);
   const selectedCartridge = store.cartridges.find(c => c.id === selectedCartridgeId);
   const selectedPrinter = store.printers.find(p => p.inventoryNumber === selectedPrinterInv);
 
@@ -195,7 +172,6 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
       balanceCost: printer?.balanceCost ?? '',
       consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cartridge.status],
-      firmwareFlashed: !!printer?.firmwareFlashed,
     };
   };
 
@@ -250,6 +226,18 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
           cartridgeIds: batch.cartridgeIds.map(id => id === oldId ? newId : id),
           items: (batch.items ?? []).map(item => item.kind === 'cartridge' && item.id === oldId ? { ...item, id: newId } : item),
         })));
+        store.setWarehouseLedger(prev => ({
+          ...prev,
+          items: prev.items.map(it => (it.id === oldId ? { ...it, id: newId } : it)),
+          shipmentBatches: prev.shipmentBatches.map(b => ({
+            ...b,
+            items: b.items.map(it => {
+              if (it.id === oldId) return { ...it, id: newId };
+              if (it.replacementId === oldId) return { ...it, replacementId: newId };
+              return it;
+            }),
+          })),
+        }));
         store.setRefillLog(prev => prev.map(entry => entry.cartridgeId === oldId ? { ...entry, cartridgeId: newId } : entry));
         setSelectedCartridgeId(newId);
         setPrintStatus({ text: `ID заменён: ${oldId} → ${newId}`, ok: true });
@@ -350,7 +338,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <div className="text-gray-300 italic text-xs py-4 text-center">Нет принтеров</div>
             ) : (
               filteredPrinters.map(p => {
-                const count = store.cartridges.filter(c => c.printerInventoryNumber === p.inventoryNumber && !c.isReplaced).length;
+                const count = store.cartridges.filter(c => isLabelListCartridge(c, p.inventoryNumber)).length;
                 return (
                   <button
                     key={p.inventoryNumber}
@@ -372,7 +360,7 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
                           p.printerType === 'mfu' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'
                         }`}>
-                          {p.printerType === 'mfu' ? 'МФУ' : p.printerType === 'printer' ? 'Пр' : p.printerType}
+                          {p.printerType === 'mfu' ? 'МФУ' : p.printerType === 'printer' ? 'Принтер' : p.printerType}
                         </span>
                         <span className="bg-gray-100 px-1 rounded">{count}</span>
                         <ChevronRight size={12} />
@@ -390,6 +378,11 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
           <h3 className="font-bold text-sm text-gray-700 flex items-center space-x-2">
             <span className="w-5 h-5 bg-blue-100 text-blue-700 rounded-full text-xs flex items-center justify-center font-bold">2</span>
             <span>Выберите расходник</span>
+            {selectedPrinterInv ? (
+              <span className="ml-2 text-[10px] font-semibold normal-case text-slate-500">
+                ({printerCartridges.length})
+              </span>
+            ) : null}
           </h3>
           {!selectedPrinterInv ? (
             <div className="text-gray-300 italic text-xs py-4 text-center">Сначала выберите принтер</div>
@@ -397,9 +390,9 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <div className="text-gray-300 italic text-xs py-4 text-center">Нет расходников для этого принтера</div>
           ) : (
             <div className="space-y-1 max-h-[calc(100vh-320px)] overflow-y-auto">
-              {printerCartridges.map(c => (
+              {printerCartridges.map((c, idx) => (
                 <button
-                  key={c.id}
+                  key={`${c.id}-${idx}-${c.registrationDate}`}
                   onClick={() => setSelectedCartridgeId(c.id)}
                   className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
                     selectedCartridgeId === c.id
@@ -407,12 +400,17 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       : 'hover:bg-gray-50 border border-transparent text-gray-700'
                   }`}
                 >
-                  <div className="flex items-center space-x-1.5">
-                    <span className={`w-1.5 h-1.5 rounded-full ${c.consumableType === 'drum' ? 'bg-orange-400' : 'bg-blue-400'}`} />
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <ColorDot color={c.color} />
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.consumableType === 'drum' ? 'bg-orange-400' : 'bg-blue-400'}`} />
                     <span className="font-mono font-bold">{c.id}</span>
                     {c.consumableType === 'drum' && <span className="text-orange-600 font-bold text-xs">DRUM</span>}
                   </div>
-                  <div className="text-gray-500 mt-0.5">{c.model}</div>
+                  <div className="text-gray-500 mt-0.5 pl-0.5">
+                    <span className="text-gray-600 font-semibold">{consumableShortLabel(c, printerCartridges)}</span>
+                    <span className="text-gray-400"> · </span>
+                    {c.model}
+                  </div>
                   <div className={`text-xs mt-0.5 font-bold ${
                     c.status === 'on_hand' ? 'text-blue-600' :
                     c.status === 'at_refill' ? 'text-purple-600' :

@@ -15,6 +15,11 @@ import {
   ConsumableType,
   NewCartridge,
 } from './types';
+import {
+  DEFAULT_WAREHOUSE_LEDGER,
+  type WarehouseBatchItem,
+  type WarehouseLedgerState,
+} from './types/warehouseLedger';
 
 const LEGACY_DEFAULT_TSPL = `CLS
 CODEPAGE 1251
@@ -42,6 +47,7 @@ interface DatabaseData {
   employees: EmployeeRecord[];
   refillLog: RefillLogEntry[];
   newCartridges: NewCartridge[];
+  warehouseLedger?: WarehouseLedgerState;
 }
 
 function readLocalStorage<T>(key: string, fallback: T): T {
@@ -51,6 +57,34 @@ function readLocalStorage<T>(key: string, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+function loadWarehouseLedgerFromStorage(): WarehouseLedgerState {
+  const parsed = readLocalStorage<Partial<WarehouseLedgerState> | null>('warehouse_ledger', null);
+  if (parsed && Array.isArray((parsed as WarehouseLedgerState).items) && Array.isArray((parsed as WarehouseLedgerState).shipmentBatches)) {
+    const w = parsed as WarehouseLedgerState;
+    return {
+      ...DEFAULT_WAREHOUSE_LEDGER,
+      ...w,
+      items: w.items,
+      shipmentBatches: w.shipmentBatches,
+      auditLogs: w.auditLogs ?? [],
+    };
+  }
+  try {
+    const legacyItems = localStorage.getItem('warehouse_items_v3');
+    if (legacyItems) {
+      return {
+        ...DEFAULT_WAREHOUSE_LEDGER,
+        items: JSON.parse(legacyItems) as WarehouseLedgerState['items'],
+        shipmentBatches: JSON.parse(localStorage.getItem('warehouse_batches_v3') ?? '[]') as WarehouseLedgerState['shipmentBatches'],
+        auditLogs: JSON.parse(localStorage.getItem('warehouse_logs_v3') ?? '[]') as WarehouseLedgerState['auditLogs'],
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return { ...DEFAULT_WAREHOUSE_LEDGER };
 }
 
 function shouldUseFileDatabase() {
@@ -74,6 +108,7 @@ function useDebouncedDatabase(data: DatabaseData, hydrated: boolean) {
       localStorage.setItem('employees', JSON.stringify(data.employees));
       localStorage.setItem('refill_log', JSON.stringify(data.refillLog));
       localStorage.setItem('new_cartridges', JSON.stringify(data.newCartridges));
+      localStorage.setItem('warehouse_ledger', JSON.stringify(data.warehouseLedger ?? DEFAULT_WAREHOUSE_LEDGER));
     }, 1500);
     return () => window.clearTimeout(handle);
   }, [data, hydrated]);
@@ -335,6 +370,11 @@ export const useStore = () => {
     if (shouldUseFileDatabase()) return [];
     return readLocalStorage<NewCartridge[]>('new_cartridges', []);
   });
+
+  const [warehouseLedger, setWarehouseLedger] = useState<WarehouseLedgerState>(() => {
+    if (shouldUseFileDatabase()) return { ...DEFAULT_WAREHOUSE_LEDGER };
+    return loadWarehouseLedgerFromStorage();
+  });
   const [dbProcessing, setDbProcessing] = useState<{
     visible: boolean;
     done: boolean;
@@ -387,6 +427,18 @@ export const useStore = () => {
           setEmployees((db.employees ?? []) as EmployeeRecord[]);
           setRefillLog((db.refillLog ?? []) as RefillLogEntry[]);
           setNewCartridges((db.newCartridges ?? []) as NewCartridge[]);
+          const wl = (db as Partial<DatabaseData>).warehouseLedger;
+          setWarehouseLedger(
+            wl
+              ? {
+                  ...DEFAULT_WAREHOUSE_LEDGER,
+                  ...wl,
+                  items: wl.items ?? [],
+                  shipmentBatches: wl.shipmentBatches ?? [],
+                  auditLogs: wl.auditLogs ?? [],
+                }
+              : loadWarehouseLedgerFromStorage(),
+          );
           setProgressAt(6);
         } else {
           const rawPrinters = readLocalStorage<(Partial<Printer> & { inventoryNumber: string })[]>('printers', []);
@@ -408,6 +460,7 @@ export const useStore = () => {
           setEmployees(readLocalStorage<EmployeeRecord[]>('employees', []));
           setRefillLog(readLocalStorage<RefillLogEntry[]>('refill_log', []));
           setNewCartridges(readLocalStorage<NewCartridge[]>('new_cartridges', []));
+          setWarehouseLedger(loadWarehouseLedgerFromStorage());
           setProgressAt(6);
         }
         setHydrated(true);
@@ -455,36 +508,64 @@ export const useStore = () => {
     employees,
     refillLog,
     newCartridges,
-  }), [printers, cartridges, repairs, batches, settings, employees, refillLog, newCartridges]);
+    warehouseLedger,
+  }), [printers, cartridges, repairs, batches, settings, employees, refillLog, newCartridges, warehouseLedger]);
 
   useDebouncedDatabase(database, hydrated);
 
   const addPrinter = (printer: Printer, logAction?: string) => {
     const inventoryNumber = normalizeInventoryNumber(printer.inventoryNumber);
+    const prevExisting = printers.find(p => p.inventoryNumber === inventoryNumber);
     const withProgramId: Printer = {
       ...printer,
       inventoryNumber,
       programId: printer.programId ?? generateDeterministicId('P', inventoryNumber),
     };
+    const firmwareJustMarked =
+      withProgramId.firmwareFlashed === true && prevExisting?.firmwareFlashed !== true;
+
     setPrinters(prev => [
       ...prev.filter(p => p.inventoryNumber !== inventoryNumber),
       withProgramId,
     ]);
-    setRefillLog(prev => [...prev, {
-      id: Math.random().toString(36).substr(2, 9),
-      date: new Date().toISOString(),
-      cartridgeId: withProgramId.programId ?? withProgramId.inventoryNumber,
-      cartridgeModel: withProgramId.model,
-      consumableType: 'device',
-      deviceType: withProgramId.printerType,
-      serviceType: 'Создание',
-      printerInventoryNumber: withProgramId.inventoryNumber,
-      printerModel: withProgramId.model,
-      department: withProgramId.department,
-      employee: withProgramId.boss,
-      action: logAction ?? 'Принтер добавлен в систему',
-      is_technical: true,
-    }]);
+    setRefillLog(prev => {
+      const created: RefillLogEntry = {
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        cartridgeId: withProgramId.programId ?? withProgramId.inventoryNumber,
+        cartridgeModel: withProgramId.model,
+        consumableType: 'device',
+        deviceType: withProgramId.printerType,
+        serviceType: 'Создание',
+        printerInventoryNumber: withProgramId.inventoryNumber,
+        printerModel: withProgramId.model,
+        department: withProgramId.department,
+        employee: withProgramId.boss,
+        action: logAction ?? 'Принтер добавлен в систему',
+        is_technical: true,
+      };
+      const next: RefillLogEntry[] = [...prev, created];
+      if (firmwareJustMarked) {
+        next.push({
+          id: Math.random().toString(36).substr(2, 9),
+          date: new Date().toISOString(),
+          cartridgeId: withProgramId.programId ?? withProgramId.inventoryNumber,
+          cartridgeModel: withProgramId.model,
+          consumableType: 'device',
+          deviceType: withProgramId.printerType,
+          serviceType: 'Редактирование',
+          printerInventoryNumber: withProgramId.inventoryNumber,
+          printerModel: withProgramId.model,
+          department: withProgramId.department,
+          employee: withProgramId.boss,
+          action: prevExisting
+            ? `Отметка «принтер прошит» установлена при сохранении карточки. Инв. № ${withProgramId.inventoryNumber}, модель ${withProgramId.model}. На этикетке будет отображаться метка прошивки.`
+            : 'При добавлении принтера установлена отметка «принтер прошит»: прошивка зафиксирована в учёте (метка на этикетке).',
+          is_technical: false,
+        });
+      }
+      return next;
+    });
   };
 
   const removePrinter = (inventoryNumber: string) => {
@@ -1060,7 +1141,218 @@ export const useStore = () => {
   };
 
   const updatePrinter = (inventoryNumber: string, updates: Partial<Printer>) => {
+    const prevP = printers.find(p => p.inventoryNumber === inventoryNumber);
+    const logFirmwareMarked =
+      !!prevP &&
+      updates.firmwareFlashed === true &&
+      prevP.firmwareFlashed !== true;
+
     setPrinters(prev => prev.map(p => (p.inventoryNumber === inventoryNumber ? { ...p, ...updates } : p)));
+
+    if (logFirmwareMarked && prevP) {
+      const p: Printer = { ...prevP, ...updates };
+      addRefillLog({
+        id: Math.random().toString(36).substr(2, 9),
+        date: new Date().toISOString(),
+        cartridgeId: p.programId ?? p.inventoryNumber,
+        cartridgeModel: p.model,
+        consumableType: 'device',
+        deviceType: p.printerType,
+        serviceType: 'Редактирование',
+        printerInventoryNumber: p.inventoryNumber,
+        printerModel: p.model,
+        department: p.department,
+        employee: p.boss,
+        action:
+          `Отметка «принтер прошит» установлена: прошивка зафиксирована в учёте. Инв. № ${p.inventoryNumber}, модель ${p.model}. На этикетке будет отображаться метка прошивки.`,
+        is_technical: false,
+      });
+    }
+  };
+
+  /**
+   * Приём принтера «с заправки» с приёмной (сканер): синхронизирует снимок партии склада и legacy `batches`,
+   * если устройство отмечалось в активной партии как at_refill.
+   */
+  const applyWarehouseReceiveForPrinterFromDashboard = (repairId: string, deviceRowId: string) => {
+    const printer = printers.find(
+      p => p.programId === deviceRowId || p.inventoryNumber === deviceRowId,
+    );
+    const inv = printer?.inventoryNumber ?? '';
+    const programId = printer?.programId;
+
+    const matchesChildParent = (parentId: string | undefined) => {
+      if (!parentId) return false;
+      if (parentId === deviceRowId) return true;
+      if (inv && parentId === inv) return true;
+      if (programId && parentId === programId) return true;
+      return false;
+    };
+
+    let batchIdToSync: string | null = null;
+    let nextItemsForLegacy: WarehouseBatchItem[] | null = null;
+
+    setWarehouseLedger(prev => {
+      const batch = prev.shipmentBatches.find(
+        b =>
+          b.status === 'sent' &&
+          b.items.some(
+            it =>
+              it.type === 'Устройство' &&
+              it.repairId === repairId &&
+              it.status === 'at_refill',
+          ),
+      );
+      if (!batch) return prev;
+
+      const nextItems = batch.items.map(it => {
+        if (it.status !== 'at_refill') return it;
+        const isDevice = it.type === 'Устройство' && it.repairId === repairId;
+        const isChild = matchesChildParent(it.parentDeviceId);
+        if (isDevice || isChild) {
+          return { ...it, status: 'ready' as const, refillCount: it.refillCount + 1 };
+        }
+        return it;
+      });
+
+      const hasAtRefill = nextItems.some(i => i.status === 'at_refill');
+      batchIdToSync = batch.id;
+      nextItemsForLegacy = nextItems;
+
+      const nextShipmentBatches = prev.shipmentBatches.map(b =>
+        b.id !== batch.id
+          ? b
+          : {
+              ...b,
+              items: nextItems,
+              status: hasAtRefill ? b.status : ('received' as const),
+              dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
+            },
+      );
+
+      const nextLedgerItems = prev.items.map(it => {
+        if (it.status !== 'at_refill') return it;
+        const matchDevice = it.type === 'Устройство' && it.repairId === repairId;
+        const matchChild = matchesChildParent(it.parentDeviceId);
+        if (matchDevice || matchChild) {
+          return { ...it, status: 'ready', refillCount: it.refillCount + 1 };
+        }
+        return it;
+      });
+
+      return { ...prev, shipmentBatches: nextShipmentBatches, items: nextLedgerItems };
+    });
+
+    if (batchIdToSync && nextItemsForLegacy) {
+      const hasAtRefill = nextItemsForLegacy.some(i => i.status === 'at_refill');
+      setBatches(pb =>
+        pb.map(b =>
+          b.id === batchIdToSync
+            ? { ...b, status: hasAtRefill ? ('sent' as const) : ('received' as const) }
+            : b,
+        ),
+      );
+    }
+  };
+
+  /** Приём одного расходника с заправки с приёмной — снимок партии в склад не «зависает» в at_refill. */
+  const applyWarehouseReceiveForCartridgeFromDashboard = (cartridgeId: string) => {
+    let batchIdToSync: string | null = null;
+    let nextItemsForLegacy: WarehouseBatchItem[] | null = null;
+
+    setWarehouseLedger(prev => {
+      const batch = prev.shipmentBatches.find(
+        b =>
+          b.status === 'sent' && b.items.some(it => it.id === cartridgeId && it.status === 'at_refill'),
+      );
+      if (!batch) return prev;
+
+      const nextItems = batch.items.map(it =>
+        it.id === cartridgeId && it.status === 'at_refill'
+          ? { ...it, status: 'ready' as const, refillCount: it.refillCount + 1 }
+          : it,
+      );
+      const hasAtRefill = nextItems.some(i => i.status === 'at_refill');
+      batchIdToSync = batch.id;
+      nextItemsForLegacy = nextItems;
+
+      const nextShipmentBatches = prev.shipmentBatches.map(b =>
+        b.id !== batch.id
+          ? b
+          : {
+              ...b,
+              items: nextItems,
+              status: hasAtRefill ? b.status : ('received' as const),
+              dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
+            },
+      );
+
+      const nextLedgerItems = prev.items.map(it => {
+        if (it.id === cartridgeId && it.status === 'at_refill') {
+          return { ...it, status: 'ready', refillCount: it.refillCount + 1 };
+        }
+        return it;
+      });
+
+      return { ...prev, shipmentBatches: nextShipmentBatches, items: nextLedgerItems };
+    });
+
+    if (batchIdToSync && nextItemsForLegacy) {
+      const hasAtRefill = nextItemsForLegacy.some(i => i.status === 'at_refill');
+      setBatches(pb =>
+        pb.map(b =>
+          b.id === batchIdToSync
+            ? { ...b, status: hasAtRefill ? ('sent' as const) : ('received' as const) }
+            : b,
+        ),
+      );
+    }
+  };
+
+  /**
+   * Выдача на руки: обновить shipmentBatches + ledger.items (как кнопка «Выдать» на вкладке Склад).
+   * Вызывать после смены статусов в основной БД (ремонт/расходники).
+   */
+  const applyWarehouseIssueSnapshotFromDashboard = (idsToIssue: string[], recipient: string) => {
+    const issueDate = new Date().toISOString();
+    const who = recipient.trim() || 'Сотрудник';
+    const idSet = new Set(idsToIssue.filter(Boolean));
+
+    setWarehouseLedger(prev => {
+      const nextShipmentBatches = prev.shipmentBatches.map(b => {
+        const hasAny = b.items.some(it => idSet.has(it.id));
+        if (!hasAny) return b;
+        const updated = b.items.map(item => {
+          if (!idSet.has(item.id)) return item;
+          if (item.status === 'issued' || item.status === 'replaced') return item;
+          return {
+            ...item,
+            status: 'issued' as const,
+            whoPickedUp: who,
+            issueDate,
+          };
+        });
+        const allClosed = updated.every(i => i.status === 'issued' || i.status === 'replaced');
+        return {
+          ...b,
+          status: allClosed ? ('closed' as const) : b.status,
+          items: updated,
+        };
+      });
+
+      const nextItems = prev.items.map(i => {
+        if (!idSet.has(i.id)) return i;
+        if (i.status !== 'ready') return i;
+        return {
+          ...i,
+          status: 'issued',
+          whoPickedUp: who,
+          issueDate,
+        };
+      });
+
+      return { ...prev, shipmentBatches: nextShipmentBatches, items: nextItems };
+    });
   };
 
   /** Сразу записать пустую базу на диск / в localStorage (обход 1.5s debounce перед reload). */
@@ -1076,6 +1368,7 @@ export const useStore = () => {
       employees: [],
       refillLog: [],
       newCartridges: [],
+      warehouseLedger: { ...DEFAULT_WAREHOUSE_LEDGER },
     };
     if (shouldUseFileDatabase() && window.electronAPI?.saveDatabase) {
       const res = await window.electronAPI.saveDatabase(empty);
@@ -1092,6 +1385,7 @@ export const useStore = () => {
     localStorage.setItem('employees', '[]');
     localStorage.setItem('refill_log', '[]');
     localStorage.setItem('new_cartridges', '[]');
+    localStorage.setItem('warehouse_ledger', JSON.stringify(DEFAULT_WAREHOUSE_LEDGER));
   };
 
   return {
@@ -1102,6 +1396,7 @@ export const useStore = () => {
     settings, setSettings,
     employees, setEmployees,
     refillLog, setRefillLog,
+    warehouseLedger, setWarehouseLedger,
     addPrinter,
     removePrinter,
     updatePrinter,
@@ -1124,6 +1419,9 @@ export const useStore = () => {
     addRefillLog,
     cancelWaitingCartridgeIntake,
     cancelWaitingRepairIntake,
+    applyWarehouseReceiveForPrinterFromDashboard,
+    applyWarehouseReceiveForCartridgeFromDashboard,
+    applyWarehouseIssueSnapshotFromDashboard,
     getEmployeesForPrinter,
     getEmployeesForCartridge,
     newCartridges, setNewCartridges,
