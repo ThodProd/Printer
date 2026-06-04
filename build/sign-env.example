@@ -1,7 +1,9 @@
-# Copy this file to "sign-env.local" in the same folder (sign-env.local is gitignored).
-# Fill in your Authenticode .pfx path and password. Then run from repo root:
-#   powershell -ExecutionPolicy Bypass -File scripts\sign-and-dist.ps1
-# Только NSIS-установщик: scripts\installer-signed.ps1  или  npm run installer:signed:ps
+# Скопируйте в sign-env.local (файл в git не попадает).
 #
-CSC_LINK=D:\path\to\your-codesign.pfx
-CSC_KEY_PASSWORD=your_password_here
+# --- PFX (electron-builder, installer-signed.ps1) ---
+# CSC_LINK=D:\path\to\codesign.pfx
+# CSC_KEY_PASSWORD=your_password_here
+#
+# --- Сертификат из хранилища Windows (sign-release.ps1) ---
+# CERT_SHA1=0737682D0089999A067F1412B27D7AAF4547D83A
+# CERT_SUBJECT=Code Signing

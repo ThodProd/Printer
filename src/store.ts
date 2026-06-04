@@ -239,6 +239,7 @@ function migrateCartridge(c: Partial<Cartridge> & { id: string }): Cartridge {
     ...(Number.isFinite((c as any).consumableSlot)
       ? { consumableSlot: (c as any).consumableSlot as number }
       : {}),
+    labelPrinted: c.labelPrinted === true,
   };
 }
 

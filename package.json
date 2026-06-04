@@ -21,6 +21,8 @@
     "dist:quick": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win dir --x64 --publish never --config.win.signAndEditExecutable=false",
     "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never",
     "installer:signed:ps": "powershell -ExecutionPolicy Bypass -File ./scripts/installer-signed.ps1",
+    "release:sign": "powershell -ExecutionPolicy Bypass -File ./scripts/sign-release.ps1",
+    "release:build": "powershell -ExecutionPolicy Bypass -File ./scripts/build-release.ps1",
     "dist:signed": "npm run build && electron-builder --win nsis --x64 --publish never",
     "dist:all": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis zip dir --x64 --publish never",
     "dist:all:signed": "npm run build && electron-builder --win nsis zip dir --x64 --publish never",

@@ -4,6 +4,7 @@ dist/
 release/
 dist-release/
 release-*/
+../Printer-release/
 *.log
 .env
 .env.local
@@ -11,5 +12,10 @@ release-*/
 Thumbs.db
 *.local
 sign-env.local
+build/sign-env.local
 *.pfx
 *.p12
+
+# IDE / agent (не нужны для сборки)
+.cursor/
+.claude/

@@ -180,21 +180,36 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   const doPrint = async (cartridge: Cartridge) => {
-    if (!cfg.labelPrinterName) {
-      setPrintStatus({ text: 'Принтер не выбран — укажите в Настройках.', ok: false });
-      return;
-    }
-    if (!window.electronAPI) {
-      setPrintStatus({ text: 'Прямая отправка доступна только в desktop-версии (.exe).', ok: false });
-      return;
-    }
-    setPrintStatus(null);
-    const tspl = buildTSPL(cartridge);
-    const res = await window.electronAPI.rawPrint(cfg.labelPrinterName, tspl, cfg.labelPrintMode);
-    if (res.success) {
-      setPrintStatus({ text: `Этикетка отправлена на «${cfg.labelPrinterName}»`, ok: true });
+    const proceedPrint = async () => {
+      if (!cfg.labelPrinterName) {
+        setPrintStatus({ text: 'Принтер не выбран — укажите в Настройках.', ok: false });
+        return;
+      }
+      if (!window.electronAPI) {
+        setPrintStatus({ text: 'Прямая отправка доступна только в desktop-версии (.exe).', ok: false });
+        return;
+      }
+      setPrintStatus(null);
+      const tspl = buildTSPL(cartridge);
+      const res = await window.electronAPI.rawPrint(cfg.labelPrinterName, tspl, cfg.labelPrintMode);
+      if (res.success) {
+        store.updateCartridge(cartridge.id, { labelPrinted: true });
+        setPrintStatus({ text: `Этикетка отправлена на «${cfg.labelPrinterName}»`, ok: true });
+      } else {
+        setPrintStatus({ text: res.error ?? 'Ошибка отправки', ok: false });
+      }
+    };
+
+    if (cartridge.labelPrinted) {
+      setConfirmModal({
+        message: `Внимание! Этикетка на данный расходник (${cartridge.id}) уже была напечатана. Вы уверены, что хотите напечатать её повторно?`,
+        onConfirm: () => {
+          setConfirmModal(null);
+          proceedPrint();
+        },
+      });
     } else {
-      setPrintStatus({ text: res.error ?? 'Ошибка отправки', ok: false });
+      await proceedPrint();
     }
   };
 
@@ -411,15 +426,22 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <span className="text-gray-400"> · </span>
                     {c.model}
                   </div>
-                  <div className={`text-xs mt-0.5 font-bold ${
-                    c.status === 'on_hand' ? 'text-blue-600' :
-                    c.status === 'at_refill' ? 'text-purple-600' :
-                    'text-gray-400'
-                  }`}>
-                    {c.status === 'on_hand' ? 'На руках' :
-                     c.status === 'at_refill' ? 'На заправке' :
-                     c.status === 'waiting' ? 'Ожидает' :
-                     (STATUS_LABELS[c.status] ?? 'Статус неизвестен')}
+                  <div className="flex items-center justify-between mt-0.5 pl-0.5">
+                    <div className={`text-xs font-bold ${
+                      c.status === 'on_hand' ? 'text-blue-600' :
+                      c.status === 'at_refill' ? 'text-purple-600' :
+                      'text-gray-400'
+                    }`}>
+                      {c.status === 'on_hand' ? 'На руках' :
+                       c.status === 'at_refill' ? 'На заправке' :
+                       c.status === 'waiting' ? 'Ожидает' :
+                       (STATUS_LABELS[c.status] ?? 'Статус неизвестен')}
+                    </div>
+                    {c.labelPrinted && (
+                      <span className="text-[10px] bg-green-100 text-green-700 px-1.5 py-0.5 rounded font-bold">
+                        Напечатана
+                      </span>
+                    )}
                   </div>
                 </button>
               ))}
@@ -442,6 +464,22 @@ const PrintingTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <div><span className="text-gray-400">Принтер:</span> <strong>{selectedCartridge.printerInventoryNumber}</strong></div>
                   <div><span className="text-gray-400">Модель:</span> <strong>{selectedCartridge.model}</strong></div>
                   <div><span className="text-gray-400">Заправок:</span> <strong>{selectedCartridge.refillCount}</strong></div>
+                </div>
+
+                {/* Checkbox for labelPrinted */}
+                <div className="flex items-center gap-2 bg-gray-50 p-2.5 rounded-lg border text-xs">
+                  <input
+                    type="checkbox"
+                    id="printing-cart-label-printed"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                    checked={!!selectedCartridge.labelPrinted}
+                    onChange={e => {
+                      store.updateCartridge(selectedCartridge.id, { labelPrinted: e.target.checked });
+                    }}
+                  />
+                  <label htmlFor="printing-cart-label-printed" className="text-gray-700 cursor-pointer select-none font-semibold">
+                    Этикетка на этот расходник уже напечатана
+                  </label>
                 </div>
 
                 <button

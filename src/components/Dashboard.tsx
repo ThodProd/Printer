@@ -7,6 +7,7 @@ import {
 import { Cartridge, STATUS_LABELS, STATUS_COLORS, HistoryEntry, Printer } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { ConfirmModal } from './ConfirmModal';
 
 const RU_TO_EN_LAYOUT: Record<string, string> = {
   й: 'q', ц: 'w', у: 'e', к: 'r', е: 't', н: 'y', г: 'u', ш: 'i', щ: 'o', з: 'p', х: '[', ъ: ']',
@@ -55,6 +56,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
   const [centerNotice, setCenterNotice] = useState<string | null>(null);
   const [printerIntake, setPrinterIntake] = useState<PrinterIntakeState | null>(null);
   const [printerReturn, setPrinterReturn] = useState<PrinterReturnState | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -867,27 +869,70 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
                 </button>
               </div>
 
+              {/* Checkbox for labelPrinted */}
+              {infoCard.cartridge && (
+                <div className="flex items-center gap-2 mb-3 bg-gray-50 p-2.5 rounded-xl border text-xs">
+                  <input
+                    type="checkbox"
+                    id="dashboard-cart-label-printed"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                    checked={!!infoCard.cartridge.labelPrinted}
+                    onChange={e => {
+                      store.updateCartridge(infoCard.cartridge.id, { labelPrinted: e.target.checked });
+                      setInfoCard({
+                        ...infoCard,
+                        cartridge: { ...infoCard.cartridge, labelPrinted: e.target.checked }
+                      });
+                    }}
+                  />
+                  <label htmlFor="dashboard-cart-label-printed" className="text-gray-700 cursor-pointer select-none font-semibold">
+                    Этикетка на этот расходник уже напечатана
+                  </label>
+                </div>
+              )}
+
               {/* Print label shortcut */}
               {infoCard.cartridge && (
                 <button
                   onClick={async () => {
-                    if (!store.settings.labelPrinterName || !window.electronAPI) return;
-                    const printer = store.printers.find(p => p.inventoryNumber === infoCard.cartridge.printerInventoryNumber);
-                    const tspl = buildTSPLLabel(getTemplate(store.settings), store.settings, {
-                      id: infoCard.cartridge.id,
-                      inv: infoCard.cartridge.printerInventoryNumber,
-                      cartModel: infoCard.cartridge.model,
-                      printerModel: printer?.model ?? '',
-                      fio: printer?.boss ?? '',
-                      boss: printer?.boss ?? '',
-                      department: printer?.department ?? '',
-                      printerType: printer?.printerType ?? '',
-                      commissionDate: printer?.commissionDate ?? '',
-                      balanceCost: printer?.balanceCost ?? '',
-                      consumableType: infoCard.cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-                      status: STATUS_LABELS[infoCard.cartridge.status],
-                    });
-                    await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+                    const proceedPrint = async () => {
+                      if (!store.settings.labelPrinterName || !window.electronAPI) return;
+                      const printer = store.printers.find(p => p.inventoryNumber === infoCard.cartridge.printerInventoryNumber);
+                      const tspl = buildTSPLLabel(getTemplate(store.settings), store.settings, {
+                        id: infoCard.cartridge.id,
+                        inv: infoCard.cartridge.printerInventoryNumber,
+                        cartModel: infoCard.cartridge.model,
+                        printerModel: printer?.model ?? '',
+                        fio: printer?.boss ?? '',
+                        boss: printer?.boss ?? '',
+                        department: printer?.department ?? '',
+                        printerType: printer?.printerType ?? '',
+                        commissionDate: printer?.commissionDate ?? '',
+                        balanceCost: printer?.balanceCost ?? '',
+                        consumableType: infoCard.cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+                        status: STATUS_LABELS[infoCard.cartridge.status],
+                      });
+                      const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+                      if (res.success) {
+                        store.updateCartridge(infoCard.cartridge.id, { labelPrinted: true });
+                        setInfoCard({
+                          ...infoCard,
+                          cartridge: { ...infoCard.cartridge, labelPrinted: true }
+                        });
+                      }
+                    };
+
+                    if (infoCard.cartridge.labelPrinted) {
+                      setConfirmModal({
+                        message: `Внимание! Этикетка на данный расходник (${infoCard.cartridge.id}) уже была напечатана. Вы уверены, что хотите напечатать её повторно?`,
+                        onConfirm: () => {
+                          setConfirmModal(null);
+                          proceedPrint();
+                        },
+                      });
+                    } else {
+                      await proceedPrint();
+                    }
                   }}
                   disabled={!store.settings.labelPrinterName || !window.electronAPI}
                   className="w-full py-2 border border-blue-200 text-blue-600 rounded-xl text-xs font-semibold hover:bg-blue-50 flex items-center justify-center space-x-2 disabled:opacity-40 disabled:cursor-not-allowed"
@@ -1084,6 +1129,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
             ))}
           </div>
         </div>
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
       )}
     </div>
   );

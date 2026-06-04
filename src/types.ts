@@ -60,6 +60,8 @@ export interface Cartridge {
   linkedRepairId?: string;
   /** Порядковый номер расходника у принтера (Картридж 2 / Драм 2); не уменьшается при удалении */
   consumableSlot?: number;
+  /** Флаг о том, что этикетка на данный картридж уже была напечатана */
+  labelPrinted?: boolean;
 }
 
 export interface Printer {

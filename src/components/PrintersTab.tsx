@@ -730,38 +730,56 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!id) return;
     const cart = store.cartridges.find(c => c.id === id);
     if (!cart) return;
-    if (!store.settings.labelPrinterName) {
-      if (cartId) setPrintStatus({ id: cartId, text: 'Принтер не выбран', ok: false });
-      else setCartPrintStatus('Принтер не выбран в Настройках');
-      return;
-    }
-    if (!window.electronAPI) {
-      if (cartId) setPrintStatus({ id: cartId, text: 'Только в desktop-версии', ok: false });
-      else setCartPrintStatus('Только в desktop-версии');
-      return;
-    }
-    const template = getTemplate(store.settings);
-    const printer = store.printers.find(p => p.inventoryNumber === cart.printerInventoryNumber);
-    const tspl = buildTSPLLabel(template, store.settings, {
-      id: cart.id,
-      inv: cart.printerInventoryNumber,
-      cartModel: cart.model,
-      printerModel: printer?.model ?? '',
-      fio: printer?.boss ?? '',
-      boss: printer?.boss ?? '',
-      department: printer?.department ?? '',
-      printerType: printer?.printerType ?? '',
-      commissionDate: printer?.commissionDate ?? '',
-      balanceCost: printer?.balanceCost ?? '',
-      consumableType: cart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-      status: STATUS_LABELS[cartridgeDisplayStatus(cart)],
-    });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
-    if (cartId) {
-      setPrintStatus({ id: cartId, text: res.success ? 'Отправлено!' : (res.error ?? 'Ошибка'), ok: res.success });
-      setTimeout(() => setPrintStatus(null), 3000);
+
+    const proceedPrint = async () => {
+      if (!store.settings.labelPrinterName) {
+        if (cartId) setPrintStatus({ id: cartId, text: 'Принтер не выбран', ok: false });
+        else setCartPrintStatus('Принтер не выбран в Настройках');
+        return;
+      }
+      if (!window.electronAPI) {
+        if (cartId) setPrintStatus({ id: cartId, text: 'Только в desktop-версии', ok: false });
+        else setCartPrintStatus('Только в desktop-версии');
+        return;
+      }
+      const template = getTemplate(store.settings);
+      const printer = store.printers.find(p => p.inventoryNumber === cart.printerInventoryNumber);
+      const tspl = buildTSPLLabel(template, store.settings, {
+        id: cart.id,
+        inv: cart.printerInventoryNumber,
+        cartModel: cart.model,
+        printerModel: printer?.model ?? '',
+        fio: printer?.boss ?? '',
+        boss: printer?.boss ?? '',
+        department: printer?.department ?? '',
+        printerType: printer?.printerType ?? '',
+        commissionDate: printer?.commissionDate ?? '',
+        balanceCost: printer?.balanceCost ?? '',
+        consumableType: cart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        status: STATUS_LABELS[cartridgeDisplayStatus(cart)],
+      });
+      const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      if (res.success) {
+        store.updateCartridge(cart.id, { labelPrinted: true });
+      }
+      if (cartId) {
+        setPrintStatus({ id: cartId, text: res.success ? 'Отправлено!' : (res.error ?? 'Ошибка'), ok: res.success });
+        setTimeout(() => setPrintStatus(null), 3000);
+      } else {
+        setCartPrintStatus(res.success ? 'Этикетка отправлена!' : (res.error ?? 'Ошибка печати'));
+      }
+    };
+
+    if (cart.labelPrinted) {
+      setConfirmModal({
+        message: `Внимание! Этикетка на данный расходник (${cart.id}) уже была напечатана. Вы уверены, что хотите напечатать её повторно?`,
+        onConfirm: () => {
+          setConfirmModal(null);
+          proceedPrint();
+        },
+      });
     } else {
-      setCartPrintStatus(res.success ? 'Этикетка отправлена!' : (res.error ?? 'Ошибка печати'));
+      await proceedPrint();
     }
   };
 
@@ -1422,7 +1440,20 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                               </button>
                             </div>
                           </div>
-                          <div className="text-[10px] font-mono text-gray-400 mt-0.5">ID: {c.id}</div>
+                          <div className="flex items-center justify-between mt-1">
+                            <div className="text-[10px] font-mono text-gray-400">ID: {c.id}</div>
+                            <label className="flex items-center gap-1 text-[10px] text-gray-500 cursor-pointer select-none" title="Этикетка напечатана">
+                              <input
+                                type="checkbox"
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-3 w-3 cursor-pointer"
+                                checked={!!c.labelPrinted}
+                                onChange={e => {
+                                  store.updateCartridge(c.id, { labelPrinted: e.target.checked });
+                                }}
+                              />
+                              <span>Этикетка напечатана</span>
+                            </label>
+                          </div>
                           {detailsCartEditor?.id === c.id ? (
                             <div className="mt-2 space-y-2 border-t border-gray-100 pt-2">
                               <label className="text-[10px] text-gray-500 block">Модель</label>
