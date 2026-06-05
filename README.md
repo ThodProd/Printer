@@ -2,66 +2,68 @@
 
 Desktop-приложение для учёта картриджей, печати этикеток TSC TTP-225 и работы со штрих-кодами.
 
+**Последние изменения:** [CHANGELOG.md](CHANGELOG.md)
+
+## Сборка на новом компьютере
+
+Подробно: **[BUILD.md](BUILD.md)**
+
+```powershell
+git clone <url> Printer
+cd Printer
+npm install
+# Проверка обязательных файлов:
+Test-Path build/icon.ico, drivers/TSC_driver.cab
+
+# Portable + установщик + подпись (если есть сертификат):
+npm run release:build
+```
+
+Артефакты: **`../Printer-release/`** (рядом с репозиторием).
+
+| Команда | Что получится |
+|---------|----------------|
+| `npm run dist:portable` | Portable EXE |
+| `npm run dist:installer` | NSIS установщик |
+| `npm run release:sign` | Подпись уже собранных EXE |
+| `npm run installer:signed:ps` | NSIS с PFX (`build/sign-env.local`) |
+
 ## Запуск готового EXE
 
-### Быстрый старт
-1. Распакуйте `CartridgeControl-1.0.0-win.zip` из папки `release/`
-2. Запустите `CartridgeControl.exe`
-3. Или запустите напрямую из `release/win-unpacked/CartridgeControl.exe`
+1. Portable: `CartridgeControl 1.0.0.exe`
+2. Или установщик: `CartridgeControl Setup 1.0.0.exe`
+3. Папка `Data/` создаётся **рядом с exe** при первом запуске
 
-Папка `Data/` для хранения данных создаётся **рядом с exe-файлом** автоматически при первом запуске.
+## Разработка
 
-## Сборка из исходников
-
-### Требования
-- Node.js 18+
-- Windows 10/11
-
-### Установка зависимостей
 ```bash
 npm install
+npm run dev                 # браузер
+npm run build && npm run electron:dev
 ```
 
-### Режим разработки (браузер)
-```bash
-npm run dev
-```
+## Структура репозитория (сборка)
 
-### Режим разработки (Electron desktop)
-```bash
-npm run build
-npm run electron:dev
 ```
-
-### Сборка EXE (ZIP + папка)
-```bash
-npm run dist
+build/icon.ico          — иконка (обязательна в git)
+build/sign-env.example  — шаблон подписи
+drivers/TSC_driver.cab  — драйвер TSC (в установщик)
+electron/               — main + preload
+scripts/                — PowerShell-сборка и подпись
 ```
-Результат в папке `release/`:
-- `win-unpacked/CartridgeControl.exe` — готовый EXE
-- `CartridgeControl-1.0.0-win.zip` — архив для распространения
-
-### Сборка установщика NSIS
-Требует Developer Mode в Windows (Параметры → Обновление → Для разработчиков → Режим разработчика).
-```bash
-npm run dist:installer
-```
-
-## Структура данных (localStorage)
-Все данные хранятся в localStorage браузера / Electron (папка userData). При запуске из Electron
-папка `Data/` создаётся рядом с exe.
 
 ## Настройки принтера TSC TTP-225
-1. Откройте вкладку **Настройки** → **Принтер**
-2. Нажмите **Обновить** для получения списка принтеров (только в desktop-версии)
-3. Выберите принтер `TSC TTP-225` или введите имя вручную
-4. Сохраните настройки
 
-## Размер этикетки
-- По умолчанию: **45 × 15 мм** (соответствует TSC TTP-225)
-- QR-код (левая часть) + штрих-код Code128 (правая часть)
-- Уникальный код формата: `C-YYYYMMDD-XXXXXX`
+1. Вкладка **Настройки** → **Принтер**
+2. **Обновить** список принтеров (desktop)
+3. Выберите `TSC TTP-225` или введите имя вручную
+
+## Этикетка
+
+- По умолчанию: **43 × 15 мм** (настраивается в Настройках)
+- Шаблон TSPL в редакторе этикеток
 
 ## Горячие клавиши
-- **Прием/Выдача** — главный экран для сканирования
-- Поле ввода автофокусируется, сканер работает как клавиатура (HID)
+
+- **Приём/Выдача** — сканирование на главном экране
+- Сканер работает как HID-клавиатура

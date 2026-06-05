@@ -14,7 +14,21 @@
     "electron:dev": "cross-env NODE_ENV=development electron .",
     "electron:build": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win zip dir --x64 --publish never",
     "dist": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win zip dir --x64 --publish never",
-    "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never"
+    "dist:exe": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable dir --x64 --publish never",
+    "dist:portable": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable --x64 --publish never",
+    "exe": "npm run dist:portable",
+    "quick:exe": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win portable --x64 --publish never --config.win.signAndEditExecutable=false",
+    "dist:quick": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win dir --x64 --publish never --config.win.signAndEditExecutable=false",
+    "dist:installer": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis --x64 --publish never",
+    "installer:signed:ps": "powershell -ExecutionPolicy Bypass -File ./scripts/installer-signed.ps1",
+    "release:sign": "powershell -ExecutionPolicy Bypass -File ./scripts/sign-release.ps1",
+    "release:build": "powershell -ExecutionPolicy Bypass -File ./scripts/build-release.ps1",
+    "dist:signed": "npm run build && electron-builder --win nsis --x64 --publish never",
+    "dist:all": "npm run build && cross-env CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --win nsis zip dir --x64 --publish never",
+    "dist:all:signed": "npm run build && electron-builder --win nsis zip dir --x64 --publish never",
+    "gitnexus:analyze": "gitnexus analyze --skip-git .",
+    "gitnexus:serve": "gitnexus serve",
+    "gitnexus:graph": "gitnexus analyze --skip-git . && gitnexus serve"
   },
   "build": {
     "appId": "com.cartridgecontrol.app",
@@ -22,7 +36,7 @@
     "icon": "build/icon.ico",
     "copyright": "CartridgeControl 2026",
     "directories": {
-      "output": "release",
+      "output": "../Printer-release",
       "buildResources": "build"
     },
     "files": [
@@ -38,19 +52,38 @@
       {
         "from": "drivers/",
         "to": "drivers/",
-        "filter": ["**/*"]
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
       "icon": "build/icon.ico",
+      "signAndEditExecutable": true,
+      "signtoolOptions": {
+        "signingHashAlgorithms": [
+          "sha256"
+        ],
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      },
       "target": [
         {
           "target": "zip",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "dir",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "forceCodeSigning": false
@@ -83,6 +116,7 @@
     "cross-env": "^7.0.3",
     "electron": "^36.2.0",
     "electron-builder": "^26.0.12",
+    "gitnexus": "^1.6.4-rc.21",
     "tailwindcss": "4.1.17",
     "typescript": "5.9.3",
     "vite": "7.2.4",

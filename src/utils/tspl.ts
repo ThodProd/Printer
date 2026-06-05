@@ -64,6 +64,9 @@ function dots(value: number | undefined, fallback = 0): number {
   return Math.max(0, Math.round(value ?? fallback));
 }
 
+/** Метка «прошивка есть» на этикетке ({fw} / {firmware}) */
+export const LABEL_FIRMWARE_MARK = 'Прошит';
+
 export interface LabelData {
   id: string;
   inv: string;
@@ -83,16 +86,30 @@ export interface LabelData {
   location?: string;
   description?: string;
   vendor?: string;
+  /** true только если у связанного принтера отмечена прошивка — тогда {fw}/{firmware} дают «П», иначе пусто */
+  firmwareFlashed?: boolean;
+}
+
+/**
+ * Legacy compatibility: old custom templates could contain hardcoded TEXT "...","П".
+ * Convert only those TEXT payloads to {fw}, so firmware marker is data-driven.
+ */
+function normalizeLegacyFirmwareToken(tspl: string): string {
+  return tspl.replace(
+    /^(TEXT\s+[^,\r\n]+(?:,[^,\r\n]+){5},)"П"\s*$/gim,
+    '$1"{fw}"',
+  );
 }
 
 /** Replace template variables with actual data */
 export function resolveContent(
   tpl: string,
   data: LabelData,
+  options?: { preserveFirmwareTokens?: boolean },
 ): string {
   const printerModel = data.printerModel ?? data.model ?? '';
   const fio = data.fio ?? data.boss ?? '';
-  return tpl
+  let out = tpl
     .replace(/\{id\}/g, data.id)
     .replace(/\{inv\}/g, data.inv)
     .replace(/\{model\}/g, printerModel)
@@ -112,6 +129,14 @@ export function resolveContent(
     .replace(/\{description\}/g, data.description ?? '')
     .replace(/\{vendor\}/g, data.vendor ?? '')
     .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
+
+  if (!options?.preserveFirmwareTokens) {
+    out = out
+      .replace(/\{fw\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
+      .replace(/\{firmware\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '');
+  }
+
+  return out;
 }
 
 /** Build a complete TSPL print job from template + settings + data */
@@ -122,7 +147,8 @@ export function buildTSPLLabel(
   options: { ignoreCustomTspl?: boolean } = {},
 ): string {
   if (settings.labelTsplTemplate && !options.ignoreCustomTspl) {
-    return resolveContent(settings.labelTsplTemplate, data).trimEnd();
+    const normalizedTemplate = normalizeLegacyFirmwareToken(settings.labelTsplTemplate);
+    return resolveContent(normalizedTemplate, data).trimEnd();
   }
 
   const effectiveSettings: AppSettings = {
@@ -133,7 +159,7 @@ export function buildTSPLLabel(
   const lines: string[] = [buildTSPLHeader(effectiveSettings)];
 
   template.elements.forEach(el => {
-    const content = esc(resolveContent(el.content, data));
+    const content = esc(resolveContent(el.content, data, { preserveFirmwareTokens: true }));
     const x = dots(el.x);
     const y = dots(el.y);
     const rotation = el.rotation ?? 0;

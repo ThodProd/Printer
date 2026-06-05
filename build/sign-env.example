@@ -1,0 +1,9 @@
+# Скопируйте в sign-env.local (файл в git не попадает).
+#
+# --- PFX (electron-builder, installer-signed.ps1) ---
+# CSC_LINK=D:\path\to\codesign.pfx
+# CSC_KEY_PASSWORD=your_password_here
+#
+# --- Сертификат из хранилища Windows (sign-release.ps1) ---
+# CERT_SHA1=0737682D0089999A067F1412B27D7AAF4547D83A
+# CERT_SUBJECT=Code Signing

@@ -19,12 +19,15 @@ import {
 import { Cartridge, Printer, HistoryEntry, STATUS_LABELS, STATUS_COLORS } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { useStickyState } from '../utils/useStickyState';
+import { ConfirmModal } from './ConfirmModal';
 
 const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [query, setQuery] = useState('');
+  const [query, setQuery] = useStickyState('search_global', '');
   const [selectedPrinter, setSelectedPrinter] = useState<Printer | null>(null);
   const [selectedCartridge, setSelectedCartridge] = useState<Cartridge | null>(null);
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ message: string; onConfirm: () => void } | null>(null);
 
   useEffect(() => {
     const onScan = (event: Event) => {
@@ -71,36 +74,56 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
 
   const handlePrintCartridge = async (cartridge: Cartridge) => {
-    if (!store.settings.labelPrinterName) {
-      setPrintStatus({ text: 'Принтер этикеток не выбран (Настройки)', ok: false });
-      return;
+    const proceedPrint = async () => {
+      if (!store.settings.labelPrinterName) {
+        setPrintStatus({ text: 'Принтер этикеток не выбран (Настройки)', ok: false });
+        return;
+      }
+      if (!window.electronAPI) {
+        setPrintStatus({ text: 'Только в desktop-версии', ok: false });
+        return;
+      }
+      const template = getTemplate(store.settings);
+      const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+      const tspl = buildTSPLLabel(template, store.settings, {
+        id: cartridge.id,
+        inv: cartridge.printerInventoryNumber,
+        cartModel: cartridge.model,
+        printerModel: printer?.model ?? '',
+        fio: printer?.boss ?? '',
+        boss: printer?.boss ?? '',
+        department: printer?.department ?? '',
+        printerType: printer?.printerType ?? '',
+        commissionDate: printer?.commissionDate ?? '',
+        balanceCost: printer?.balanceCost ?? '',
+        consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        status: STATUS_LABELS[cartridge.status],
+      });
+      const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      if (res.success) {
+        store.updateCartridge(cartridge.id, { labelPrinted: true });
+        if (selectedCartridge && selectedCartridge.id === cartridge.id) {
+          setSelectedCartridge({ ...selectedCartridge, labelPrinted: true });
+        }
+      }
+      setPrintStatus(res.success
+        ? { text: `Этикетка ${cartridge.id} отправлена`, ok: true }
+        : { text: res.error ?? 'Ошибка', ok: false }
+      );
+      setTimeout(() => setPrintStatus(null), 3000);
+    };
+
+    if (cartridge.labelPrinted) {
+      setConfirmModal({
+        message: `Внимание! Этикетка на данный расходник (${cartridge.id}) уже была напечатана. Вы уверены, что хотите напечатать её повторно?`,
+        onConfirm: () => {
+          setConfirmModal(null);
+          proceedPrint();
+        },
+      });
+    } else {
+      await proceedPrint();
     }
-    if (!window.electronAPI) {
-      setPrintStatus({ text: 'Только в desktop-версии', ok: false });
-      return;
-    }
-    const template = getTemplate(store.settings);
-    const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-    const tspl = buildTSPLLabel(template, store.settings, {
-      id: cartridge.id,
-      inv: cartridge.printerInventoryNumber,
-      cartModel: cartridge.model,
-      printerModel: printer?.model ?? '',
-      fio: printer?.boss ?? '',
-      boss: printer?.boss ?? '',
-      department: printer?.department ?? '',
-      printerType: printer?.printerType ?? '',
-      commissionDate: printer?.commissionDate ?? '',
-      balanceCost: printer?.balanceCost ?? '',
-      consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-      status: STATUS_LABELS[cartridge.status],
-    });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
-    setPrintStatus(res.success
-      ? { text: `Этикетка ${cartridge.id} отправлена`, ok: true }
-      : { text: res.error ?? 'Ошибка', ok: false }
-    );
-    setTimeout(() => setPrintStatus(null), 3000);
   };
 
   const handlePrintPrinter = async (printer: Printer) => {
@@ -124,6 +147,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       printerType: printer.printerType,
       commissionDate: printer.commissionDate,
       balanceCost: printer.balanceCost,
+      firmwareFlashed: !!printer.firmwareFlashed,
     });
     const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     setPrintStatus(res.success
@@ -198,7 +222,12 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                             <span className="font-mono">{p.programId}</span>
                           </div>
                         )}
-                        <div className="text-sm text-gray-600">{p.model}</div>
+                        <div className="text-sm text-gray-600 flex items-center gap-1.5 flex-wrap">
+                          <span>{p.model}</span>
+                          {p.firmwareFlashed && (
+                            <span className="inline-block w-2 h-2 rounded-full bg-red-500 shrink-0" title="Прошит" />
+                          )}
+                        </div>
                         <div className="text-xs text-gray-400 mt-0.5">{p.department}{p.boss ? ` — ${p.boss}` : ''}</div>
                       </div>
                       <div className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full shrink-0 ml-2">
@@ -292,7 +321,12 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         <span className="font-mono">ID: {selectedPrinter.programId}</span>
                       </div>
                     )}
-                    <p className="opacity-80 text-sm mt-0.5">{selectedPrinter.model}</p>
+                    <p className="opacity-80 text-sm mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>{selectedPrinter.model}</span>
+                      {selectedPrinter.firmwareFlashed && (
+                        <span className="inline-block w-2 h-2 rounded-full bg-red-400 shrink-0" title="Прошит" />
+                      )}
+                    </p>
                   </div>
                   <PrinterIcon size={28} className="opacity-40" />
                 </div>
@@ -406,6 +440,23 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </div>
                 </div>
 
+                {/* Checkbox for labelPrinted */}
+                <div className="flex items-center gap-2 mb-3 bg-gray-50 p-2.5 rounded-lg border border-gray-100">
+                  <input
+                    type="checkbox"
+                    id="search-cart-label-printed"
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                    checked={!!selectedCartridge.labelPrinted}
+                    onChange={e => {
+                      store.updateCartridge(selectedCartridge.id, { labelPrinted: e.target.checked });
+                      setSelectedCartridge({ ...selectedCartridge, labelPrinted: e.target.checked });
+                    }}
+                  />
+                  <label htmlFor="search-cart-label-printed" className="text-xs text-gray-700 cursor-pointer select-none font-semibold">
+                    Этикетка на этот расходник уже напечатана
+                  </label>
+                </div>
+
                 {/* Print button for cartridge */}
                 <button
                   onClick={() => handlePrintCartridge(selectedCartridge)}
@@ -455,6 +506,14 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
           )}
         </div>
       </div>
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
     </div>
   );
 };

@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { exec, execSync } = require('child_process');
+const crypto = require('crypto');
 
 const isDev = process.env.NODE_ENV === 'development';
 
@@ -134,7 +135,7 @@ function buildMenu() {
 function ensureDataDirs() {
   const base = getDataDir();
 
-  ['', 'Logs', 'Backups', 'Config'].forEach(sub => {
+  ['', 'logs', 'backup', 'config', 'Logs', 'Backups', 'Config'].forEach(sub => {
     const dir = path.join(base, sub);
     if (!fs.existsSync(dir)) {
       try { fs.mkdirSync(dir, { recursive: true }); } catch {}
@@ -150,16 +151,149 @@ function getDataDir() {
   const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
   if (portableDir) return path.join(portableDir, 'Data');
 
-  // Installed app: keep data near installed executable.
-  return path.join(path.dirname(app.getPath('exe')), 'Data');
+  // Installed app: store under current user's Documents to avoid Program Files/ACL issues.
+  return path.join(app.getPath('documents'), 'CartridgeControl', 'Data');
 }
 
 function getDatabasePath() {
   return path.join(getDataDir(), 'database.json');
 }
 
+function appendAppLog(message) {
+  try {
+    ensureDataDirs();
+    const ts = new Date();
+    const file = path.join(getDataDir(), 'logs', `${ts.toISOString().slice(0, 10)}.log`);
+    fs.appendFileSync(file, `[${ts.toISOString()}] ${message}\n`, 'utf8');
+  } catch {}
+}
+
+let lastBackupAt = 0;
+function writeBackupSnapshot(data, reason = 'auto') {
+  try {
+    ensureDataDirs();
+    const now = Date.now();
+    if (reason === 'auto' && now - lastBackupAt < 5 * 60 * 1000) return null;
+    lastBackupAt = now;
+    const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
+    const backupPath = path.join(getDataDir(), 'backup', `database-${reason}-${stamp}.json`);
+    fs.writeFileSync(backupPath, JSON.stringify(data, null, 2), 'utf8');
+    appendAppLog(`backup created: ${backupPath}`);
+    return backupPath;
+  } catch {
+    return null;
+  }
+}
+
+let _sessionStartTime = null;
+
+function formatDate(date) {
+  const pad = num => String(num).padStart(2, '0');
+  const yyyy = date.getFullYear();
+  const MM = pad(date.getMonth() + 1);
+  const dd = pad(date.getDate());
+  const HH = pad(date.getHours());
+  const mm = pad(date.getMinutes());
+  const ss = pad(date.getSeconds());
+  return `${yyyy}-${MM}-${dd}_${HH}-${mm}-${ss}`;
+}
+
+function getFileHash(filePath) {
+  try {
+    const content = fs.readFileSync(filePath);
+    return crypto.createHash('sha256').update(content).digest('hex');
+  } catch {
+    return '';
+  }
+}
+
+function InitializeBackupSystem() {
+  try {
+    const base = getDataDir();
+    const backupsDir = path.join(base, 'backups');
+    const tempDir = path.join(base, 'temp');
+    
+    if (!fs.existsSync(backupsDir)) fs.mkdirSync(backupsDir, { recursive: true });
+    if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+    _sessionStartTime = new Date();
+
+    const dbPath = getDatabasePath();
+    const tempDbPath = path.join(tempDir, 'database_temp.json');
+
+    // 1. Проверяем, есть ли временный файл от предыдущего некорректного запуска
+    if (fs.existsSync(tempDbPath)) {
+      try {
+        const stat = fs.statSync(tempDbPath);
+        const crashTime = stat.mtime || stat.ctime || new Date();
+        const crashBackupName = `Аварийное_завершение_${formatDate(crashTime)}.json`;
+        const crashBackupPath = path.join(backupsDir, crashBackupName);
+
+        if (fs.existsSync(crashBackupPath)) {
+          fs.unlinkSync(crashBackupPath);
+        }
+        fs.renameSync(tempDbPath, crashBackupPath);
+        appendAppLog(`Обнаружено некорректное завершение работы. База восстановлена в бэкап: ${crashBackupName}`);
+      } catch (ex) {
+        appendAppLog(`Ошибка при обработке аварийного файла бэкапа: ${ex.message}`);
+      }
+    }
+
+    // 2. Если текущая база существует, сохраняем её во временную папку для текущей сессии
+    if (fs.existsSync(dbPath)) {
+      fs.copyFileSync(dbPath, tempDbPath);
+      // Установим время изменения временного файла равным времени начала сессии
+      fs.utimesSync(tempDbPath, _sessionStartTime, _sessionStartTime);
+      appendAppLog(`База данных скопирована во временный файл для сессии`);
+    }
+  } catch (ex) {
+    appendAppLog(`Ошибка инициализации системы бэкапов: ${ex.message}`);
+  }
+}
+
+function FinalizeBackupSystem() {
+  try {
+    const base = getDataDir();
+    const backupsDir = path.join(base, 'backups');
+    const tempDir = path.join(base, 'temp');
+    const dbPath = getDatabasePath();
+    const tempDbPath = path.join(tempDir, 'database_temp.json');
+
+    if (fs.existsSync(tempDbPath) && fs.existsSync(dbPath)) {
+      const hashOpening = getFileHash(tempDbPath);
+      const hashClosing = getFileHash(dbPath);
+
+      // Если хэши не совпадают, значит были изменения в БД за время сессии
+      if (hashOpening !== hashClosing) {
+        const sessionEndTime = new Date();
+
+        const openingBackupName = `Открытие_${formatDate(_sessionStartTime)}.json`;
+        const closingBackupName = `Закрытие_${formatDate(sessionEndTime)}.json`;
+
+        const openingBackupPath = path.join(backupsDir, openingBackupName);
+        const closingBackupPath = path.join(backupsDir, closingBackupName);
+
+        // Копируем временный файл (состояние на момент открытия) в бэкапы
+        fs.copyFileSync(tempDbPath, openingBackupPath);
+        // Копируем текущий файл (состояние на момент закрытия) в бэкапы
+        fs.copyFileSync(dbPath, closingBackupPath);
+
+        appendAppLog(`Созданы бэкапы сессии: ${openingBackupName} и ${closingBackupName}`);
+      } else {
+        appendAppLog(`Изменений в базе данных не обнаружено. Бэкапы сессии не создавались.`);
+      }
+
+      // Удаляем временный файл при нормальном закрытии
+      fs.unlinkSync(tempDbPath);
+    }
+  } catch (ex) {
+    appendAppLog(`Ошибка завершения системы бэкапов: ${ex.message}`);
+  }
+}
+
 app.whenReady().then(() => {
   ensureDataDirs();
+  InitializeBackupSystem();
   createWindow();
 
   app.on('activate', () => {
@@ -169,6 +303,10 @@ app.whenReady().then(() => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  FinalizeBackupSystem();
 });
 
 // ─── IPC Handlers ────────────────────────────────────────────────────────────
@@ -226,33 +364,114 @@ ipcMain.handle('get-printers', async event => {
  * Generic/Text Only driver on the USB port for reliable TSPL passthrough.
  */
 ipcMain.handle('raw-print', async (_event, printerName, tsplData, mode = 'raw') => {
-  return new Promise(resolve => {
-    if (!printerName) {
-      resolve({ success: false, error: 'Принтер не выбран. Укажите принтер в Настройках.' });
-      return;
-    }
+  if (!printerName) {
+    return { success: false, error: 'Принтер не выбран. Укажите принтер в Настройках.' };
+  }
 
+  // ── SHELL MODE ───────────────────────────────────────────────────────────
+  // Uses Electron's own webContents.print() — the print job comes from
+  // CartridgeControl.exe itself, exactly like pressing Ctrl+P in any app.
+  // Security software that blocks PowerShell/scripts will NOT block this.
+  // The TSPL is sent as plain text; works when the printer driver is set to
+  // TEXT or RAW spool data type (TSC OEM driver with "passthrough" mode).
+  if (mode === 'shell') {
+    return new Promise(resolve => {
+      try {
+        const tsplText = ensureTsplStartsWithCls(tsplData);
+        const escaped = tsplText
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;');
+        const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>*{margin:0;padding:0;}body{font-family:monospace;font-size:6pt;white-space:pre;line-height:1.1;}</style></head><body>${escaped}</body></html>`;
+
+        const printWin = new BrowserWindow({
+          show: false,
+          skipTaskbar: true,
+          webPreferences: {
+            nodeIntegration: false,
+            contextIsolation: true,
+            offscreen: false,
+          },
+        });
+
+        let settled = false;
+        const settle = result => {
+          if (settled) return;
+          settled = true;
+          try { if (!printWin.isDestroyed()) printWin.destroy(); } catch {}
+          resolve(result);
+        };
+
+        const timer = setTimeout(() => settle({ success: false, error: 'Timeout: принтер не ответил за 20 секунд' }), 20000);
+
+        printWin.webContents.once('did-finish-load', () => {
+          printWin.webContents.print(
+            { silent: true, printBackground: false, deviceName: printerName },
+            (success, failureReason) => {
+              clearTimeout(timer);
+              settle(success
+                ? { success: true }
+                : { success: false, error: `Ошибка Electron print: ${failureReason ?? 'unknown'}` },
+              );
+            },
+          );
+        });
+
+        printWin.webContents.on('did-fail-load', (_e, code, desc) => {
+          clearTimeout(timer);
+          settle({ success: false, error: `Не удалось загрузить страницу для печати: ${desc} (${code})` });
+        });
+
+        printWin.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+      } catch (e) {
+        resolve({ success: false, error: String(e.message ?? e) });
+      }
+    });
+  }
+
+  // ── DRIVER MODE (cmd.exe) ────────────────────────────────────────────────
+  // Uses Windows built-in print.exe via cmd.exe — NO PowerShell at all.
+  // Security policies that block powershell.exe will not affect this path.
+  if (mode === 'driver') {
+    return new Promise(resolve => {
+      try {
+        const tmpFile = path.join(os.tmpdir(), `label_${Date.now()}.prn`);
+        fs.writeFileSync(tmpFile, encodeWindows1251(ensureTsplStartsWithCls(tsplData)));
+
+        // Wrap printer name in quotes; escape internal quotes for cmd
+        const safeName = printerName.replace(/"/g, '');
+        const safePath = tmpFile;
+
+        // Primary: print.exe /D:"<name>" "<file>"  (built into Windows)
+        const cmd = `print /D:"${safeName}" "${safePath}"`;
+
+        exec(`cmd.exe /c ${cmd}`, { timeout: 20000 }, (err, stdout, stderr) => {
+          try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
+          if (err) {
+            const msg = (stderr || stdout || err.message || '').toString().trim();
+            resolve({
+              success: false,
+              error: `Ошибка print.exe: ${msg || err.message}. Попробуйте режим «RAW» или «Через приложение».`,
+            });
+          } else {
+            resolve({ success: true });
+          }
+        });
+      } catch (e) {
+        resolve({ success: false, error: String(e.message ?? e) });
+      }
+    });
+  }
+
+  // ── RAW MODE (Win32 winspool via PowerShell C# P/Invoke) ─────────────────
+  return new Promise(resolve => {
     try {
       const tmpFile = path.join(os.tmpdir(), `label_${Date.now()}.prn`);
-      // Write as ASCII bytes (TSPL is ASCII-compatible)
       fs.writeFileSync(tmpFile, encodeWindows1251(ensureTsplStartsWithCls(tsplData)));
 
       const safePrinterName = printerName.replace(/'/g, "''");
       const safeFilePath = tmpFile.replace(/\\/g, '\\\\').replace(/'/g, "''");
-      const psScript = mode === 'driver' ? `
-$ErrorActionPreference = 'Stop';
-$printerName = '${safePrinterName}';
-$filePath = '${safeFilePath}';
-try {
-  & print.exe /D:$printerName $filePath | Out-Null;
-  Write-Output "OK";
-} catch {
-  Write-Error $_.Exception.Message;
-  exit 1;
-} finally {
-  if (Test-Path $filePath) { Remove-Item $filePath -Force -ErrorAction SilentlyContinue }
-}
-` : `
+      const psScript = `
 $ErrorActionPreference = 'Stop';
 $printerName = '${safePrinterName}';
 $filePath = '${safeFilePath}';
@@ -288,7 +507,7 @@ public class RawPrint {
   $hPrinter = [IntPtr]::Zero;
   if (-not [RawPrint]::OpenPrinter($printerName, [ref]$hPrinter, [IntPtr]::Zero)) {
     $errCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error();
-    throw "OpenPrinter failed (Win32=$errCode). Проверьте имя принтера. Рекомендуется использовать 'TSC TTP-225 (RAW)'"
+    throw "OpenPrinter failed (Win32=$errCode). Проверьте имя принтера."
   }
   $di = New-Object RawPrint+DOC_INFO_1;
   $di.pDocName = "TSPL Print Job";
@@ -308,7 +527,7 @@ public class RawPrint {
   [RawPrint]::ClosePrinter($hPrinter) | Out-Null;
 
   if (-not $ok) {
-    throw "WritePrinter error (Win32=$writeErr). Если используется OEM-драйвер TSC, смените принтер на 'TSC TTP-225 (RAW)' в Настройках."
+    throw "WritePrinter error (Win32=$writeErr). Если используется OEM-драйвер TSC, смените на режим 'Драйвер (cmd)' или 'Через приложение'."
   }
   Write-Output "OK:$written";
 } catch {
@@ -322,7 +541,7 @@ public class RawPrint {
       const encodedScript = Buffer.from(psScript, 'utf16le').toString('base64');
 
       exec(
-        `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`,
+        `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encodedScript}`,
         { timeout: 20000 },
         (err, stdout, stderr) => {
           try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch {}
@@ -332,7 +551,7 @@ public class RawPrint {
             if (msg.includes('Win32=5')) {
               resolve({
                 success: false,
-                error: 'Ошибка печати: Windows запретил RAW-запись в выбранный драйвер (Win32=5). В настройках попробуйте режим "Драйвер Windows" или создайте принтер RAW/Generic Text Only.',
+                error: 'Windows запретил RAW-запись (Win32=5). Попробуйте режим «Драйвер (cmd)» или «Через приложение» в Настройках.',
               });
               return;
             }
@@ -358,6 +577,7 @@ ipcMain.handle('load-database', async () => {
       return { success: true, data: null, path: dbPath };
     }
     const raw = fs.readFileSync(dbPath, 'utf8');
+    appendAppLog(`database loaded: ${dbPath}`);
     return { success: true, data: JSON.parse(raw), path: dbPath };
   } catch (e) {
     return { success: false, error: String(e.message ?? e), path: getDatabasePath() };
@@ -371,6 +591,8 @@ ipcMain.handle('save-database', async (_event, data) => {
     const tmpPath = `${dbPath}.tmp`;
     fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');
     fs.renameSync(tmpPath, dbPath);
+    appendAppLog(`database saved: ${dbPath}`);
+    writeBackupSnapshot(data, 'auto');
     if (data && typeof data === 'object' && data.settings) {
       const settingsPath = path.join(getDataDir(), 'Config', 'settings.json');
       const settingsTmpPath = `${settingsPath}.tmp`;
@@ -380,6 +602,16 @@ ipcMain.handle('save-database', async (_event, data) => {
     return { success: true, path: dbPath };
   } catch (e) {
     return { success: false, error: String(e.message ?? e), path: getDatabasePath() };
+  }
+});
+
+ipcMain.handle('export-json-backup', async (_event, data) => {
+  try {
+    ensureDataDirs();
+    const backupPath = writeBackupSnapshot(data, 'export');
+    return { success: true, path: backupPath };
+  } catch (e) {
+    return { success: false, error: String(e.message ?? e) };
   }
 });
 

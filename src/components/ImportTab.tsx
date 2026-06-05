@@ -4,6 +4,7 @@ import { FileText, CheckCircle2, AlertCircle, Info } from 'lucide-react';
 import { Cartridge, Printer, PrinterType } from '../types';
 import { StoreType } from '../store';
 import { COLOR_CARTRIDGES, isColorPrinter, suggestCartridgeModels, suggestDrumModel } from '../utils/cartridgeMatcher';
+import { AlertModal } from './ConfirmModal';
 
 interface ParsedPrinter extends Printer {
   _raw: string;
@@ -18,6 +19,7 @@ function normalizeInventoryNumber(value: string): string {
 const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [fileData, setFileData] = useState('');
   const [preview, setPreview] = useState<ParsedPrinter[]>([]);
+  const [alertModal, setAlertModal] = useState<{ message: string; variant?: 'info' | 'error' | 'success' } | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
 
   /**
@@ -67,7 +69,7 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
     return {
       boss: boss || '',
-      programId: store.generatePrinterId(),
+      programId: store.generatePrinterId(inventoryNumber),
       inventoryNumber,
       printerType,
       model,
@@ -119,15 +121,29 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
       const hasConsumable = printerInvsWithConsumables.has(printer.inventoryNumber);
       if (!hasConsumable) {
+        const inv = printer.inventoryNumber;
+        const printerRow = store.printers.find(p => p.inventoryNumber === inv);
+        const cartrOfInv = store.cartridges.filter(
+          c => c.printerInventoryNumber === inv && (c.consumableType ?? 'cartridge') === 'cartridge',
+        );
+        /** Слоты вручную: несколько allocateConsumableSlot подряд дают один ID (батч React + ref). */
+        let nextCartSlot = Math.max(
+          printerRow?.consumableCartridgeSeq ?? 0,
+          cartrOfInv.length > 0 ? Math.max(...cartrOfInv.map(c => c.consumableSlot ?? 0)) : 0,
+        );
+
         const modelsToCreate = _isColor ? COLOR_CARTRIDGES : [{ color: undefined, label: printer.cartridgeModels[0] ?? '' }];
         modelsToCreate.forEach((item, index) => {
-          const id = store.generateConsumableId('cartridge');
+          nextCartSlot += 1;
+          const slot = nextCartSlot;
+          const id = store.generateConsumableId('cartridge', inv, slot);
           const cartridge: Cartridge = {
             id,
             barcode: id,
             model: _isColor ? (printer.cartridgeModels[index] ?? item.label) : item.label,
             color: item.color,
             consumableType: 'cartridge',
+            consumableSlot: slot,
             printerInventoryNumber: printer.inventoryNumber,
             status: 'on_hand',
             history: [{
@@ -141,13 +157,28 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
           store.addCartridge(cartridge);
           createdCartridges += 1;
         });
+
+        const printerPatch: Partial<Printer> = {
+          consumableCartridgeSeq: nextCartSlot,
+        };
+
         if (_drumModel) {
-          const id = store.generateConsumableId('drum');
+          const drumOfInv = store.cartridges.filter(
+            c => c.printerInventoryNumber === inv && c.consumableType === 'drum',
+          );
+          const printerRow2 = store.printers.find(p => p.inventoryNumber === inv);
+          let nextDrumSlot = Math.max(
+            printerRow2?.consumableDrumSeq ?? 0,
+            drumOfInv.length > 0 ? Math.max(...drumOfInv.map(c => c.consumableSlot ?? 0)) : 0,
+          );
+          nextDrumSlot += 1;
+          const drumId = store.generateConsumableId('drum', inv, nextDrumSlot);
           store.addCartridge({
-            id,
-            barcode: id,
+            id: drumId,
+            barcode: drumId,
             model: _drumModel,
             consumableType: 'drum',
+            consumableSlot: nextDrumSlot,
             printerInventoryNumber: printer.inventoryNumber,
             status: 'on_hand',
             history: [{
@@ -158,14 +189,20 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
             refillCount: 0,
             registrationDate: new Date().toISOString(),
           });
+          createdCartridges += 1;
+          Object.assign(printerPatch, { consumableDrumSeq: nextDrumSlot });
         }
+        store.updatePrinter(inv, printerPatch);
         printerInvsWithConsumables.add(printer.inventoryNumber);
       }
     });
     setFileData('');
     setPreview([]);
     setErrors([]);
-    alert(`Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`);
+    setAlertModal({
+      message: `Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`,
+      variant: 'success',
+    });
   };
 
   return (
@@ -282,6 +319,14 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
           </div>
         )}
       </div>
+
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => setAlertModal(null)}
+        />
+      )}
     </div>
   );
 };

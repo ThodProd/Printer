@@ -1,10 +1,21 @@
 node_modules/
+.gitnexus/
 dist/
 release/
+dist-release/
 release-*/
+../Printer-release/
 *.log
 .env
 .env.local
 .DS_Store
 Thumbs.db
 *.local
+sign-env.local
+build/sign-env.local
+*.pfx
+*.p12
+
+# IDE / agent (не нужны для сборки)
+.cursor/
+.claude/

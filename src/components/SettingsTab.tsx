@@ -1,15 +1,22 @@
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import * as XLSX from 'xlsx';
 import {
   Settings, Printer as PrinterIcon, Scan, Sliders, RefreshCw,
   Barcode as BarcodeIcon, CheckCircle2, AlertCircle, Volume2, VolumeX,
   Save, RotateCcw, Info, Wifi, PenLine,
   Trash2, MemoryStick,
 } from 'lucide-react';
-import { AppSettings, DEFAULT_SETTINGS } from '../types';
+import { AppSettings, DEFAULT_SETTINGS, STATUS_LABELS } from '../types';
 import { StoreType } from '../store';
 import { buildMemoryResetTSPL } from '../utils/tspl';
+import { mergeLedgerWithStore } from '../utils/warehouseStoreBridge';
+import {
+  warehouseItemsToExcelRows,
+  warehouseShipmentBatchToExcelRows,
+} from '../utils/excelWarehouseExport';
 import LabelEditorTab from './LabelEditorTab';
+import { ConfirmModal, AlertModal } from './ConfirmModal';
 
 async function sendTSPL(
   printerName: string,
@@ -52,8 +59,8 @@ function buildBorderTestLabel(settings: AppSettings): string {
   ].join('\r\n');
 }
 
-const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
-  const [subTab, setSubTab] = useState('printer');
+const SettingsTab: React.FC<{ store: StoreType; initialSubTab?: string }> = ({ store, initialSubTab = 'printer' }) => {
+  const [subTab, setSubTab] = useState(initialSubTab);
   const [cfg, setCfg] = useState<AppSettings>({ ...store.settings });
   const [saved, setSaved] = useState(false);
 
@@ -65,12 +72,25 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [printStatus, setPrintStatus] = useState<{ text: string; ok: boolean } | null>(null);
   const [driverStatus, setDriverStatus] = useState<{ text: string; ok: boolean } | null>(null);
   const [resettingMemory, setResettingMemory] = useState(false);
+  const [confirmModal, setConfirmModal] = useState<{
+    message: string;
+    onConfirm: () => void;
+    dangerous?: boolean;
+  } | null>(null);
+  const [alertModal, setAlertModal] = useState<{
+    message: string;
+    variant?: 'info' | 'error' | 'success';
+  } | null>(null);
 
   const [scanTestInput, setScanTestInput] = useState('');
   const [lastScan, setLastScan] = useState('');
   const scanInputRef = useRef<HTMLInputElement>(null);
 
   const isElectron = !!window.electronAPI;
+
+  useEffect(() => {
+    setSubTab(initialSubTab);
+  }, [initialSubTab]);
 
   const refreshPrinters = async () => {
     if (!isElectron) return;
@@ -118,6 +138,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       showPreviewBeforePrint: cfg.showPreviewBeforePrint,
       soundNotification: cfg.soundNotification,
       showTechLogs: cfg.showTechLogs,
+      enableEventEditing: cfg.enableEventEditing,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -164,6 +185,175 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!window.electronAPI?.getDataFolder || !window.electronAPI?.openFolder) return;
     const folder = await window.electronAPI.getDataFolder();
     await window.electronAPI.openFolder(folder);
+  };
+
+  const handleExportFullDatabase = () => {
+    const printersSheet = store.printers.map(p => ({
+      'ID программы': p.programId ?? '',
+      'Инв. №': p.inventoryNumber,
+      Модель: p.model,
+      Тип: p.printerType,
+      Подразделение: p.department,
+      'Мат. ответственный': p.boss,
+      'Дата ввода': p.commissionDate,
+      'Стоимость': p.balanceCost,
+      'Модели расходников': p.cartridgeModels.join(', '),
+      'Прошит': p.firmwareFlashed ? 'Да' : 'Нет',
+      'Счётчик заправок (устр.)': p.refillCount ?? '',
+      'Счётчик ремонтов': p.repairCount ?? '',
+      'Слот К (последний №)': p.consumableCartridgeSeq ?? '',
+      'Слот Д (последний №)': p.consumableDrumSeq ?? '',
+    }));
+    const cartridgesSheet = store.cartridges.map(c => {
+      const printer = store.printers.find(p => p.inventoryNumber === c.printerInventoryNumber);
+      return {
+        'ID': c.id,
+        Штрихкод: c.barcode,
+        Модель: c.model,
+        Тип: c.consumableType === 'drum' ? 'Драм' : 'Картридж',
+        Цвет: c.color ?? '',
+        'Статус (код)': c.status,
+        Статус: STATUS_LABELS[c.status] ?? c.status,
+        Заправок: c.refillCount,
+        'Принтер (инв.)': c.printerInventoryNumber,
+        'Принтер (ID)': printer?.programId ?? '',
+        'Принтер (модель)': printer?.model ?? '',
+        Подразделение: printer?.department ?? '',
+        'Кто сдал': c.lastSubmittedBy ?? '',
+        'Слот у принтера': c.consumableSlot ?? '',
+        'Связанный ремонт (ID)': c.linkedRepairId ?? '',
+        Заменён: c.isReplaced ? 'Да' : 'Нет',
+        'Замена (ID)': c.replacedById ?? '',
+        'Дата регистрации': new Date(c.registrationDate).toLocaleString('ru-RU'),
+        'Дата регистрации (ISO)': c.registrationDate,
+        'Записей в истории': c.history?.length ?? 0,
+      };
+    });
+
+    const repairsSheet = store.repairs.map(r => ({
+      'ID заявки': r.id,
+      'Инв. принтера': r.printerInventoryNumber,
+      Дата: new Date(r.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': r.date,
+      'Дата завершения': r.completionDate
+        ? new Date(r.completionDate).toLocaleString('ru-RU')
+        : '—',
+      'Дата завершения (ISO)': r.completionDate ?? '—',
+      Причина: r.reason,
+      Описание: r.repairDescription ?? '—',
+      'Статус (код)': r.status,
+      Комментарий: r.comment ?? '—',
+      Мастер: r.technician ?? '—',
+      'Размещение (код)': r.locationStatus ?? '—',
+    }));
+
+    const refillLogSheet = store.refillLog.map(e => ({
+      'ID записи': e.id,
+      Дата: new Date(e.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': e.date,
+      'ID в журнале': e.cartridgeId,
+      Модель: e.cartridgeModel,
+      'Тип расходника': e.consumableType,
+      'Тип устройства': e.deviceType ?? '—',
+      'Вид услуги': e.serviceType ?? '—',
+      Действие: e.action,
+      'Инв. принтера': e.printerInventoryNumber,
+      'Модель принтера': e.printerModel,
+      Подразделение: e.department ?? '—',
+      Сотрудник: e.employee ?? '—',
+      'Техническая': e.is_technical ? 'Да' : 'Нет',
+    }));
+
+    const mergedWarehouseItems = mergeLedgerWithStore(
+      store.warehouseLedger,
+      store.cartridges,
+      store.repairs,
+      store.printers,
+    );
+    const warehouseItemsSheet = warehouseItemsToExcelRows(mergedWarehouseItems);
+
+    const warehouseBatchesRows: Record<string, string | number>[] = [];
+    for (const b of store.warehouseLedger.shipmentBatches) {
+      warehouseBatchesRows.push(...warehouseShipmentBatchToExcelRows(b));
+    }
+
+    const auditSheet = store.warehouseLedger.auditLogs.map(a => ({
+      'ID': a.id,
+      Дата: new Date(a.date).toLocaleString('ru-RU'),
+      'Дата (ISO)': a.date,
+      Действие: a.action,
+      Детали: a.details,
+      Пользователь: a.user ?? '—',
+      Тип: a.type,
+    }));
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(printersSheet), 'Принтеры');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(cartridgesSheet), 'Расходники');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(repairsSheet), 'Ремонт');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(refillLogSheet), 'Журнал');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(warehouseItemsSheet), 'Склад позиции');
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        warehouseBatchesRows.length > 0
+          ? warehouseBatchesRows
+          : [{ Примечание: 'Нет партий в реестре склада' }],
+      ),
+      'Склад партии',
+    );
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(auditSheet), 'Склад аудит');
+    XLSX.writeFile(wb, `database_export_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
+  const handleExportJsonBackup = async () => {
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      printers: store.printers,
+      cartridges: store.cartridges,
+      repairs: store.repairs,
+      batches: store.batches,
+      refillLog: store.refillLog,
+      warehouseLedger: store.warehouseLedger,
+      warehouses: {
+        waiting: store.cartridges.filter(c => c.status === 'waiting'),
+        atRefill: store.cartridges.filter(c => c.status === 'at_refill'),
+        ready: store.cartridges.filter(c => c.status === 'received_from_refill' || c.status === 'ready'),
+      },
+    };
+    if (window.electronAPI?.exportJsonBackup) {
+      const res = await window.electronAPI.exportJsonBackup(payload);
+      if (!res.success) setAlertModal({ message: `Ошибка экспорта JSON: ${res.error ?? 'неизвестно'}`, variant: 'error' });
+      return;
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `database_export_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const clearSavedUiHints = () => {
+    try {
+      const keysToRemove = [
+        'inventory_sender_list',
+      ];
+      keysToRemove.forEach(key => localStorage.removeItem(key));
+
+      const dynamicKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        if (key.startsWith('search_')) {
+          dynamicKeys.push(key);
+        }
+      }
+      dynamicKeys.forEach(key => localStorage.removeItem(key));
+    } catch {
+      // ignore storage errors
+    }
   };
 
   return (
@@ -259,10 +449,23 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
             <div className="space-y-2">
               <label className="text-xs text-gray-500 uppercase font-bold">Режим отправки печати</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 gap-2">
                 {([
-                  { id: 'raw', title: 'RAW-драйвер', hint: 'Generic/Text Only или TSC RAW' },
-                  { id: 'driver', title: 'Драйвер Windows', hint: 'Запасной способ через print.exe' },
+                  {
+                    id: 'raw',
+                    title: 'RAW (Win32 API)',
+                    hint: 'Прямая запись байтов через winspool.drv. Требует Generic/Text Only или TSC RAW драйвер. Использует PowerShell.',
+                  },
+                  {
+                    id: 'driver',
+                    title: 'Драйвер (cmd.exe)',
+                    hint: 'Стандартная команда Windows print.exe через cmd.exe. Не использует PowerShell — работает там, где RAW блокируется защитным ПО.',
+                  },
+                  {
+                    id: 'shell',
+                    title: 'Через приложение ★ (рекомендуется)',
+                    hint: 'Печать через встроенный механизм Electron — как нажать Ctrl+P в Word. Не зависит от PowerShell/cmd. Работает с OEM-драйвером TSC в режиме TEXT-passthrough.',
+                  },
                 ] as const).map(mode => (
                   <button
                     key={mode.id}
@@ -275,10 +478,16 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     }`}
                   >
                     <div className="text-sm font-bold">{mode.title}</div>
-                    <div className="text-[11px] opacity-70">{mode.hint}</div>
+                    <div className="text-[11px] opacity-70 mt-0.5">{mode.hint}</div>
                   </button>
                 ))}
               </div>
+              {(cfg.labelPrintMode ?? 'raw') === 'shell' && (
+                <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  <strong>Примечание:</strong> Режим «Через приложение» печатает TSPL как обычный текст через Windows GDI.
+                  Убедитесь, что в свойствах принтера в Windows (вкладка «Дополнительно») тип данных очереди установлен в <strong>TEXT</strong> или <strong>RAW</strong> — тогда TSC-драйвер передаёт текст напрямую как TSPL-команды.
+                </p>
+              )}
             </div>
 
             {/* Printer memory reset */}
@@ -474,6 +683,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               { key: 'showPreviewBeforePrint', label: 'Показывать предпросмотр перед печатью', hint: 'Открывает окно подтверждения с превью' },
               { key: 'soundNotification', label: 'Звук после успешного сканирования', hint: 'Короткий сигнал при обработке штрих-кода' },
               { key: 'showTechLogs', label: 'Технические записи в журнале', hint: 'Показывать все системные события в журнале заправок' },
+              { key: 'enableEventEditing', label: 'Разрешить редактирование/отмену событий', hint: 'Удаление партий, отмена статусов и других операций' },
             ].map(({ key, label, hint }) => {
               const val = (cfg as unknown as Record<string, boolean>)[key];
               return (
@@ -527,16 +737,37 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 Открыть папку Data
               </button>
               <button
+                onClick={handleExportFullDatabase}
+                className="px-4 py-2 bg-green-50 text-green-700 border border-green-200 rounded-lg text-sm hover:bg-green-100 font-semibold"
+              >
+                Выгрузить всю базу в Excel
+              </button>
+              <button
+                onClick={handleExportJsonBackup}
+                className="px-4 py-2 bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-lg text-sm hover:bg-indigo-100 font-semibold"
+              >
+                Экспорт JSON (backup)
+              </button>
+              <button
+                type="button"
                 onClick={() => {
-                  if (confirm('Очистить ВСЕ данные? Это необратимо!')) {
-                    store.setPrinters([]);
-                    store.setCartridges([]);
-                    store.setRepairs([]);
-                    store.setBatches([]);
-                    store.setEmployees([]);
-                    store.setRefillLog([]);
-                    store.setNewCartridges([]);
-                  }
+                  setConfirmModal({
+                    message: 'Очистить ВСЕ данные? Это необратимо!',
+                    dangerous: true,
+                    onConfirm: async () => {
+                      setConfirmModal(null);
+                      try {
+                        await store.wipeAllPersistedData();
+                        clearSavedUiHints();
+                        window.location.reload();
+                      } catch (e) {
+                        setAlertModal({
+                          message: e instanceof Error ? e.message : 'Не удалось очистить данные',
+                          variant: 'error',
+                        });
+                      }
+                    },
+                  });
                 }}
                 className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg text-sm hover:bg-red-100 font-semibold"
               >
@@ -554,10 +785,26 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <div className="text-sm text-blue-700 space-y-1">
               <div><strong>Cartridge Control</strong> — система учёта картриджей</div>
               <div>Версия: <strong>1</strong></div>
-              <div>Создатель: <strong>Спиркин В.А.</strong></div>
+              <div>Создатель: <strong>Спиркин В.А., г. Арсеньев</strong></div>
             </div>
           </div>
         </div>
+      )}
+
+      {confirmModal && (
+        <ConfirmModal
+          message={confirmModal.message}
+          dangerous={confirmModal.dangerous}
+          onConfirm={confirmModal.onConfirm}
+          onCancel={() => setConfirmModal(null)}
+        />
+      )}
+      {alertModal && (
+        <AlertModal
+          message={alertModal.message}
+          variant={alertModal.variant}
+          onClose={() => setAlertModal(null)}
+        />
       )}
     </div>
   );

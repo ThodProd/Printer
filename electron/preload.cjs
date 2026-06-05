@@ -26,4 +26,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveDatabase: data => ipcRenderer.invoke('save-database', data),
 
   getDataFolder: () => ipcRenderer.invoke('get-data-folder'),
+
+  exportJsonBackup: data => ipcRenderer.invoke('export-json-backup', data),
 });
