@@ -68,6 +68,7 @@ interface AddCartridgeState {
   model: string;
   color?: ConsumableColor;
   printAfter: boolean;
+  fromWarehouse?: boolean;
 }
 
 const CONSUMABLE_COLORS: Array<{ id: ConsumableColor; label: string; short: string; className: string }> = [
@@ -480,13 +481,27 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const openAddCart = (invNum: string) => {
     const existing = getCartridges(invNum);
     const printer = store.printers.find(p => p.inventoryNumber === invNum);
-    const defaultModel = printer?.cartridgeModels[0] ?? '';
+    const printerModels = printer?.cartridgeModels ?? [];
+
+    const warehouseItems = store.newCartridges.filter(c => c.quantity > 0);
+    const sortedWarehouseItems = [...warehouseItems].sort((a, b) => {
+      const aMatch = printerModels.some(m => m.toLowerCase() === a.model.toLowerCase());
+      const bMatch = printerModels.some(m => m.toLowerCase() === b.model.toLowerCase());
+      if (aMatch && !bMatch) return -1;
+      if (!aMatch && bMatch) return 1;
+      return a.model.localeCompare(b.model);
+    });
+
+    const defaultModelFromWarehouse = sortedWarehouseItems[0]?.model ?? '';
+    const defaultModelFree = existing.length === 0 ? (printerModels[0] ?? '') : (printerModels[existing.length] ?? (printerModels[0] ?? ''));
+
     setAddCart({
       printerInv: invNum,
       consumableType: 'cartridge',
-      model: existing.length === 0 ? defaultModel : (printer?.cartridgeModels[existing.length] ?? defaultModel),
+      model: defaultModelFromWarehouse || defaultModelFree,
       color: undefined,
       printAfter: store.settings.autoPrintOnRegister,
+      fromWarehouse: warehouseItems.length > 0, // default to true if we actually have stock
     });
   };
 
@@ -495,6 +510,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!addCart) return;
     const slot = store.allocateConsumableSlot(addCart.printerInv, addCart.consumableType);
     const id = store.generateConsumableId(addCart.consumableType, addCart.printerInv, slot);
+    const isAutoPrint = addCart.printAfter && store.settings.labelPrinterName && !!window.electronAPI;
     const cartridge: Cartridge = {
       id,
       barcode: id,
@@ -511,8 +527,20 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         date: new Date().toISOString(),
         action: `Зарегистрирован (${addCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж'}). Выдан пользователю.`,
       }],
+      labelPrinted: isAutoPrint,
     };
     store.addCartridge(cartridge);
+
+    if (addCart.fromWarehouse) {
+      const warehouseItem = store.newCartridges.find(
+        c => c.model.toLowerCase() === addCart.model.toLowerCase() && c.quantity > 0,
+      );
+      if (warehouseItem) {
+        store.updateNewCartridge(warehouseItem.id, {
+          quantity: Math.max(0, warehouseItem.quantity - 1),
+        });
+      }
+    }
 
     if (addCart.printAfter && store.settings.labelPrinterName && window.electronAPI) {
       const template = getTemplate(store.settings);
@@ -1742,23 +1770,97 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
               <div>
                 <label className="text-xs text-gray-500 block mb-1">Модель *</label>
-                <input
-                  required
-                  autoFocus
-                  list="cart-models-list"
-                  placeholder="CF283A"
-                  className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-                  value={addCart.model}
-                  onChange={e => setAddCart({ ...addCart, model: e.target.value })}
-                />
-                <datalist id="cart-models-list">
-                  {(() => {
+                {addCart.fromWarehouse ? (
+                  (() => {
                     const printer = store.printers.find(p => p.inventoryNumber === addCart.printerInv);
-                    return (printer?.cartridgeModels ?? []).map(m => (
-                      <option key={m} value={m} />
-                    ));
-                  })()}
-                </datalist>
+                    const printerModels = printer?.cartridgeModels ?? [];
+                    const warehouseItems = store.newCartridges.filter(c => c.quantity > 0);
+                    const sortedWarehouseItems = [...warehouseItems].sort((a, b) => {
+                      const aMatch = printerModels.some(m => m.toLowerCase() === a.model.toLowerCase());
+                      const bMatch = printerModels.some(m => m.toLowerCase() === b.model.toLowerCase());
+                      if (aMatch && !bMatch) return -1;
+                      if (!aMatch && bMatch) return 1;
+                      return a.model.localeCompare(b.model);
+                    });
+
+                    return (
+                      <select
+                        required
+                        className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white font-medium"
+                        value={addCart.model}
+                        onChange={e => setAddCart({ ...addCart, model: e.target.value })}
+                      >
+                        <option value="">-- Выберите модель со склада --</option>
+                        {sortedWarehouseItems.map(item => {
+                          const isRelevant = printerModels.some(m => m.toLowerCase() === item.model.toLowerCase());
+                          return (
+                            <option key={item.id} value={item.model}>
+                              {item.model} {isRelevant ? '★' : ''} (доступно: {item.quantity} шт.)
+                            </option>
+                          );
+                        })}
+                      </select>
+                    );
+                  })()
+                ) : (
+                  <>
+                    <input
+                      required
+                      autoFocus
+                      list="cart-models-list"
+                      placeholder="CF283A"
+                      className="w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
+                      value={addCart.model}
+                      onChange={e => setAddCart({ ...addCart, model: e.target.value })}
+                    />
+                    <datalist id="cart-models-list">
+                      {(() => {
+                        const printer = store.printers.find(p => p.inventoryNumber === addCart.printerInv);
+                        return (printer?.cartridgeModels ?? []).map(m => (
+                          <option key={m} value={m} />
+                        ));
+                      })()}
+                    </datalist>
+                  </>
+                )}
+              </div>
+
+              <div className="flex items-center space-x-2 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
+                <input
+                  type="checkbox"
+                  id="fromWarehouseCheckbox"
+                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4 cursor-pointer"
+                  checked={!!addCart.fromWarehouse}
+                  onChange={e => {
+                    const checked = e.target.checked;
+                    const printer = store.printers.find(p => p.inventoryNumber === addCart.printerInv);
+                    const printerModels = printer?.cartridgeModels ?? [];
+                    let nextModel = '';
+
+                    if (checked) {
+                      const warehouseItems = store.newCartridges.filter(c => c.quantity > 0);
+                      const sortedWarehouseItems = [...warehouseItems].sort((a, b) => {
+                        const aMatch = printerModels.some(m => m.toLowerCase() === a.model.toLowerCase());
+                        const bMatch = printerModels.some(m => m.toLowerCase() === b.model.toLowerCase());
+                        if (aMatch && !bMatch) return -1;
+                        if (!aMatch && bMatch) return 1;
+                        return a.model.localeCompare(b.model);
+                      });
+                      nextModel = sortedWarehouseItems[0]?.model ?? '';
+                    } else {
+                      nextModel = printerModels[0] ?? '';
+                    }
+
+                    setAddCart({
+                      ...addCart,
+                      fromWarehouse: checked,
+                      model: nextModel,
+                    });
+                  }}
+                />
+                <label htmlFor="fromWarehouseCheckbox" className="text-xs text-gray-700 cursor-pointer select-none font-semibold">
+                  со склада
+                </label>
               </div>
 
               <div>

@@ -1343,7 +1343,7 @@ export const useStore = () => {
 
       const nextItems = prev.items.map(i => {
         if (!idSet.has(i.id)) return i;
-        if (i.status !== 'ready') return i;
+        if (i.status !== 'ready' && i.status !== 'at_refill' && i.status !== 'waiting') return i;
         return {
           ...i,
           status: 'issued',

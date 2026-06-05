@@ -161,7 +161,14 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedWaitingIds, setSelectedWaitingIds] = useState<Set<string>>(new Set());
-  const [expandedBatchIds, setExpandedBatchIds] = useState<Set<string>>(new Set());
+  const [expandedBatchIds, setExpandedBatchIds] = useState<Set<string>>(() => {
+    try {
+      const saved = localStorage.getItem('warehouse_expanded_batches');
+      return saved ? new Set(JSON.parse(saved)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
 
   // --- Редактирование ячеек "на лету" ---
   const [editingItemId, setEditingItemId] = useState<string | null>(null);
@@ -178,6 +185,19 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
 
   const [showReplaceDialog, setShowReplaceDialog] = useState<{ oldItemId: string; batchId: string } | null>(null);
   const [replacementModel, setReplacementModel] = useState('');
+
+  type CompletionDialogItem = {
+    batchId: string;
+    itemId: string;
+    printerInv: string;
+    printerModel: string;
+  };
+
+  const [showCompletionDialog, setShowCompletionDialog] = useState<CompletionDialogItem | null>(null);
+  const [completionQueue, setCompletionQueue] = useState<CompletionDialogItem[]>([]);
+  const [completionSolution, setCompletionSolution] = useState('');
+  const [bulkReceiveBatchId, setBulkReceiveBatchId] = useState<string | null>(null);
+  const [bulkDeviceTotal, setBulkDeviceTotal] = useState(0);
 
   // --- Форма быстрого приема на склад ---
   const [newType, setNewType] = useState<'Устройство' | 'Картридж' | 'Драм-картридж'>('Картридж');
@@ -485,77 +505,52 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
     );
   };
 
-  // --- ПРИЕМКА С ЗАПРАВКИ ---
-  const handleReceiveItem = (batchId: string, itemId: string) => {
+  const executeReceivePrinter = (batchId: string, itemId: string, solution: string) => {
     const batchSnap = batches.find(b => b.id === batchId);
     const line = batchSnap?.items.find(i => i.id === itemId);
-    const isPrinterBundleHead = !!(line?.type === 'Устройство' && line.repairId);
+    if (!line || line.type !== 'Устройство' || !line.repairId) return;
 
-    if (line?.type === 'Устройство' && line.repairId) {
-      const repair = store.repairs.find(r => r.id === line.repairId);
-      const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
-      if (repair) {
-        store.updateRepair(repair.id, {
-          status: 'repaired',
-          completionDate: new Date().toISOString(),
-          repairDescription: repair.repairDescription ?? 'Принят с заправки',
-          locationStatus: 'ready',
+    const repair = store.repairs.find(r => r.id === line.repairId);
+    const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
+    if (repair) {
+      store.updateRepair(repair.id, {
+        status: 'repaired',
+        completionDate: new Date().toISOString(),
+        repairDescription: solution.trim() || 'Принят с заправки',
+        locationStatus: 'ready',
+      });
+      store.cartridges
+        .filter(c => c.linkedRepairId === repair.id && c.status === 'at_refill')
+        .forEach(c => {
+          store.updateCartridgeStatus(
+            c.id,
+            'received_from_refill',
+            `Получен с заправки вместе с принтером. Партия ${batchId}`,
+          );
         });
-        store.cartridges
-          .filter(c => c.linkedRepairId === repair.id && c.status === 'at_refill')
-          .forEach(c => {
-            store.updateCartridgeStatus(
-              c.id,
-              'received_from_refill',
-              `Получен с заправки вместе с принтером. Партия ${batchId}`,
-            );
-          });
-        if (printer) {
-          store.updatePrinter(printer.inventoryNumber, { refillCount: (printer.refillCount ?? 0) + 1 });
-        }
-        store.addRefillLog({
-          id: Math.random().toString(36).substring(2, 11),
-          date: new Date().toISOString(),
-          cartridgeId: printer?.programId ?? line.printerInventoryNumber,
-          cartridgeModel: printer?.model ?? 'Устройство',
-          consumableType: 'device',
-          deviceType: printer?.printerType ?? 'Устройство',
-          serviceType: 'Ремонт',
-          printerInventoryNumber: line.printerInventoryNumber,
-          printerModel: printer?.model ?? '',
-          department: printer?.department ?? '',
-          employee: printer?.boss,
-          action: `Принтер получен с ремонта. Партия ${batchId}`,
-          is_technical: false,
-        });
+      if (printer) {
+        store.updatePrinter(printer.inventoryNumber, { refillCount: (printer.refillCount ?? 0) + 1 });
       }
-    } else {
-      const cartridge = store.cartridges.find(c => c.id === itemId);
-      store.updateCartridgeStatus(itemId, 'received_from_refill', `Получен с заправки. Партия ${batchId}`);
-      if (cartridge) {
-        const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-        store.addRefillLog({
-          id: Math.random().toString(36).substring(2, 11),
-          date: new Date().toISOString(),
-          cartridgeId: cartridge.id,
-          cartridgeModel: cartridge.model,
-          consumableType: cartridge.consumableType ?? 'cartridge',
-          deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-          serviceType: 'Заправка',
-          printerInventoryNumber: cartridge.printerInventoryNumber,
-          printerModel: printer?.model ?? '',
-          department: printer?.department ?? '',
-          employee: printer?.boss,
-          action: `Картридж получен с заправки. Партия ${batchId}`,
-          is_technical: false,
-        });
-      }
+      store.addRefillLog({
+        id: Math.random().toString(36).substring(2, 11),
+        date: new Date().toISOString(),
+        cartridgeId: printer?.programId ?? line.printerInventoryNumber,
+        cartridgeModel: printer?.model ?? 'Устройство',
+        consumableType: 'device',
+        deviceType: printer?.printerType ?? 'Устройство',
+        serviceType: 'Ремонт',
+        printerInventoryNumber: line.printerInventoryNumber,
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        employee: printer?.boss,
+        action: `Принтер получен с ремонта. Решение: ${solution}`,
+        is_technical: false,
+      });
     }
 
-    const childSnapshotIds =
-      isPrinterBundleHead && batchSnap
-        ? batchSnap.items.filter(i => i.parentDeviceId === itemId && i.status === 'at_refill').map(i => i.id)
-        : [];
+    const childSnapshotIds = batchSnap
+      ? batchSnap.items.filter(i => i.parentDeviceId === itemId && i.status === 'at_refill').map(i => i.id)
+      : [];
 
     patchShipmentBatches(prev =>
       prev.map(b => {
@@ -565,7 +560,7 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
           if (item.id === itemId) {
             return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
           }
-          if (isPrinterBundleHead && item.parentDeviceId === itemId) {
+          if (item.parentDeviceId === itemId) {
             return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
           }
           return item;
@@ -596,7 +591,99 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
         if (item.id === itemId) {
           return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
         }
-        if (isPrinterBundleHead && item.parentDeviceId === itemId) {
+        if (item.parentDeviceId === itemId) {
+          return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
+        }
+        return item;
+      });
+      const hasAtRefill = simulatedItems.some(i => i.status === 'at_refill');
+      store.setWarehouseLedger(prev => {
+        return {
+          ...prev,
+          items: prev.items.map(item => {
+            if (item.id === itemId || childSnapshotIds.includes(item.id)) {
+              return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
+            }
+            return item;
+          }),
+          shipmentBatches: prev.shipmentBatches.map(b => {
+            if (b.id !== batchId) return b;
+            return {
+              ...b,
+              status: hasAtRefill ? b.status : ('received' as const),
+              dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
+              items: simulatedItems,
+            };
+          }),
+        };
+      });
+
+      const hasAtRefillLegacy = simulatedItems.some(i => i.status === 'at_refill');
+      store.setBatches(pb =>
+        pb.map(b => (b.id === batchId ? { ...b, status: hasAtRefillLegacy ? 'sent' : 'received' } : b)),
+      );
+    }
+
+    addLog('Получен с ремонта/заправки', `Устройство ${itemId} принято с ремонта. Решение: ${solution}`);
+  };
+
+  const receiveCartridgeFromBatch = (batchId: string, itemId: string) => {
+    const batchSnap = batches.find(b => b.id === batchId);
+    const cartridge = store.cartridges.find(c => c.id === itemId);
+    store.updateCartridgeStatus(itemId, 'received_from_refill', `Получен с заправки. Партия ${batchId}`);
+    if (cartridge) {
+      const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+      store.addRefillLog({
+        id: Math.random().toString(36).substring(2, 11),
+        date: new Date().toISOString(),
+        cartridgeId: cartridge.id,
+        cartridgeModel: cartridge.model,
+        consumableType: cartridge.consumableType ?? 'cartridge',
+        deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
+        serviceType: 'Заправка',
+        printerInventoryNumber: cartridge.printerInventoryNumber,
+        printerModel: printer?.model ?? '',
+        department: printer?.department ?? '',
+        employee: printer?.boss,
+        action: `Картридж получен с заправки. Партия ${batchId}`,
+        is_technical: false,
+      });
+    }
+
+    patchShipmentBatches(prev =>
+      prev.map(b => {
+        if (b.id !== batchId) return b;
+        const updated = b.items.map(item => {
+          if (item.status !== 'at_refill') return item;
+          if (item.id === itemId) {
+            return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
+          }
+          return item;
+        });
+        const hasAtRefill = updated.some(i => i.status === 'at_refill');
+        return {
+          ...b,
+          status: hasAtRefill ? b.status : ('received' as const),
+          dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
+          items: updated,
+        };
+      }),
+    );
+
+    updateMergedItems(prev =>
+      prev.map(i => {
+        if (i.status !== 'at_refill') return i;
+        if (i.id === itemId) {
+          return { ...i, status: 'ready', refillCount: i.refillCount + 1 };
+        }
+        return i;
+      }),
+    );
+
+    if (batchSnap) {
+      const simulatedItems = batchSnap.items.map(item => {
+        if (item.status !== 'at_refill') return item;
+        if (item.id === itemId) {
           return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
         }
         return item;
@@ -606,7 +693,64 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
         pb.map(b => (b.id === batchId ? { ...b, status: hasAtRefillLegacy ? 'sent' : 'received' } : b)),
       );
     }
+  };
 
+  const cancelCompletionFlow = () => {
+    setShowCompletionDialog(null);
+    setCompletionQueue([]);
+    setCompletionSolution('');
+    setBulkReceiveBatchId(null);
+    setBulkDeviceTotal(0);
+  };
+
+  const confirmCompletionFlow = () => {
+    if (!showCompletionDialog || !completionSolution.trim()) return;
+    executeReceivePrinter(
+      showCompletionDialog.batchId,
+      showCompletionDialog.itemId,
+      completionSolution,
+    );
+    setCompletionSolution('');
+
+    if (completionQueue.length > 0) {
+      const [next, ...rest] = completionQueue;
+      setCompletionQueue(rest);
+      setShowCompletionDialog(next);
+      return;
+    }
+
+    setShowCompletionDialog(null);
+    if (bulkReceiveBatchId) {
+      addLog(
+        'Получение партии',
+        `Все элементы партии ${bulkReceiveBatchId} успешно приняты с заправки и переведены в статус "Готов к выдаче".`,
+        'success',
+      );
+      setBulkReceiveBatchId(null);
+      setBulkDeviceTotal(0);
+    }
+  };
+
+  // --- ПРИЕМКА С ЗАПРАВКИ ---
+  const handleReceiveItem = (batchId: string, itemId: string) => {
+    const batchSnap = batches.find(b => b.id === batchId);
+    const line = batchSnap?.items.find(i => i.id === itemId);
+
+    if (line?.type === 'Устройство' && line.repairId) {
+      const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
+      setCompletionQueue([]);
+      setBulkReceiveBatchId(null);
+      setBulkDeviceTotal(0);
+      setShowCompletionDialog({
+        batchId,
+        itemId,
+        printerInv: line.printerInventoryNumber,
+        printerModel: printer?.model ?? 'Устройство',
+      });
+      return;
+    }
+
+    receiveCartridgeFromBatch(batchId, itemId);
     addLog(
       'Прием элемента',
       `Элемент ${itemId} успешно получен с заправки и готов к выдаче. Количество заправок увеличилось.`,
@@ -618,103 +762,42 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
     const batch = batches.find(b => b.id === batchId);
     if (!batch) return;
 
-    const idsToUpdate = batch.items.filter(i => i.status === 'at_refill').map(i => i.id);
+    const atRefill = batch.items.filter(i => i.status === 'at_refill');
+    const devices = atRefill.filter(i => i.type === 'Устройство' && i.repairId);
+    const deviceIds = new Set(devices.map(d => d.id));
 
-    for (const line of batch.items) {
-      if (line.status !== 'at_refill') continue;
-      if (line.type === 'Устройство' && line.repairId) {
-        const repair = store.repairs.find(r => r.id === line.repairId);
-        const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
-        if (repair) {
-          store.updateRepair(repair.id, {
-            status: 'repaired',
-            completionDate: new Date().toISOString(),
-            repairDescription: repair.repairDescription ?? 'Принят с заправки',
-            locationStatus: 'ready',
-          });
-          store.cartridges
-            .filter(c => c.linkedRepairId === repair.id && c.status === 'at_refill')
-            .forEach(c => {
-              store.updateCartridgeStatus(
-                c.id,
-                'received_from_refill',
-                `Получен с заправки вместе с принтером. Партия ${batchId}`,
-              );
-            });
-          if (printer) {
-            store.updatePrinter(printer.inventoryNumber, { refillCount: (printer.refillCount ?? 0) + 1 });
-          }
-          store.addRefillLog({
-            id: Math.random().toString(36).substring(2, 11),
-            date: new Date().toISOString(),
-            cartridgeId: printer?.programId ?? line.printerInventoryNumber,
-            cartridgeModel: printer?.model ?? 'Устройство',
-            consumableType: 'device',
-            deviceType: printer?.printerType ?? 'Устройство',
-            serviceType: 'Ремонт',
-            printerInventoryNumber: line.printerInventoryNumber,
-            printerModel: printer?.model ?? '',
-            department: printer?.department ?? '',
-            employee: printer?.boss,
-            action: `Принтер получен с ремонта. Партия ${batchId}`,
-            is_technical: false,
-          });
-        }
-      } else {
-        const cartridge = store.cartridges.find(c => c.id === line.id);
-        store.updateCartridgeStatus(line.id, 'received_from_refill', `Получен с заправки. Партия ${batchId}`);
-        if (cartridge) {
-          const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-          store.addRefillLog({
-            id: Math.random().toString(36).substring(2, 11),
-            date: new Date().toISOString(),
-            cartridgeId: cartridge.id,
-            cartridgeModel: cartridge.model,
-            consumableType: cartridge.consumableType ?? 'cartridge',
-            deviceType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
-            serviceType: 'Заправка',
-            printerInventoryNumber: cartridge.printerInventoryNumber,
-            printerModel: printer?.model ?? '',
-            department: printer?.department ?? '',
-            employee: printer?.boss,
-            action: `Картридж получен с заправки. Партия ${batchId}`,
-            is_technical: false,
-          });
-        }
-      }
+    const standaloneCartridges = atRefill.filter(
+      i => i.type !== 'Устройство' && (!i.parentDeviceId || !deviceIds.has(i.parentDeviceId)),
+    );
+
+    for (const line of standaloneCartridges) {
+      receiveCartridgeFromBatch(batchId, line.id);
     }
 
-    patchShipmentBatches(prev => prev.map(b => {
-      if (b.id !== batchId) return b;
+    if (devices.length === 0) {
+      addLog(
+        'Получение партии',
+        `Все элементы партии ${batchId} успешно приняты с заправки и переведены в статус "Готов к выдаче".`,
+        'success',
+      );
+      return;
+    }
+
+    const deviceDialogs: CompletionDialogItem[] = devices.map(line => {
+      const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
       return {
-        ...b,
-        status: 'received',
-        dateReceived: new Date().toISOString(),
-        items: b.items.map(item => {
-          if (item.status === 'at_refill') {
-            return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-          }
-          return item;
-        })
+        batchId,
+        itemId: line.id,
+        printerInv: line.printerInventoryNumber,
+        printerModel: printer?.model ?? 'Устройство',
       };
-    }));
+    });
 
-    updateMergedItems(prev => prev.map(i => {
-      if (idsToUpdate.includes(i.id)) {
-        return { ...i, status: 'ready', refillCount: i.refillCount + 1 };
-      }
-      return i;
-    }));
-
-    store.setBatches(prev =>
-      prev.map(b => (b.id === batchId ? { ...b, status: 'received' } : b)),
-    );
-
-    addLog(
-      'Получение партии',
-      `Все элементы партии ${batchId} успешно приняты с заправки и переведены в статус "Готов к выдаче".`,
-      'success'
-    );
+    setBulkReceiveBatchId(batchId);
+    setBulkDeviceTotal(deviceDialogs.length);
+    setCompletionQueue(deviceDialogs.slice(1));
+    setCompletionSolution('');
+    setShowCompletionDialog(deviceDialogs[0]);
   };
 
   // --- ВЫДАЧА НА РУКИ (Кто забрал?) ---
@@ -1161,6 +1244,9 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      try {
+        localStorage.setItem('warehouse_expanded_batches', JSON.stringify(Array.from(next)));
+      } catch {}
       return next;
     });
   };
@@ -2088,6 +2174,62 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
                 className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-sm transition-all"
               >
                 Подтвердить замену
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showCompletionDialog && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white border border-gray-200 rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div>
+              <h3 className="text-base font-bold text-gray-900 flex items-center gap-2">
+                Решение по ремонту / Выполненные работы
+              </h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Для приема принтера с ремонта, введите выполненные работы (решение).
+              </p>
+              {bulkDeviceTotal > 1 && (
+                <p className="text-xs text-amber-700 mt-1 font-semibold">
+                  Устройство {bulkDeviceTotal - completionQueue.length} из {bulkDeviceTotal}
+                </p>
+              )}
+            </div>
+
+            <div className="text-sm bg-gray-50 p-3 rounded-lg border">
+              <div className="font-bold text-gray-800">{showCompletionDialog.printerInv}</div>
+              <div className="text-xs text-gray-500 mt-0.5">{showCompletionDialog.printerModel}</div>
+            </div>
+
+            <div className="space-y-3.5 text-xs text-gray-700">
+              <div>
+                <label className="text-gray-600 block mb-1 font-bold">Выполненные работы *</label>
+                <textarea
+                  required
+                  rows={3}
+                  value={completionSolution}
+                  onChange={e => setCompletionSolution(e.target.value)}
+                  placeholder="Например: Замена термопленки, чистка ролика захвата"
+                  className="w-full border border-gray-200 rounded-lg p-2.5 text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-medium bg-white"
+                  autoFocus
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-2 text-xs">
+              <button
+                onClick={cancelCompletionFlow}
+                className="flex-1 py-2.5 border border-gray-200 hover:bg-gray-50 text-gray-700 font-bold rounded-lg transition-all"
+              >
+                Отмена
+              </button>
+              <button
+                onClick={confirmCompletionFlow}
+                disabled={!completionSolution.trim()}
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold rounded-lg shadow-sm transition-all"
+              >
+                Принять
               </button>
             </div>
           </div>

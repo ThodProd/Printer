@@ -199,6 +199,24 @@ export function mergeLedgerWithStore(
     }
   }
 
+  /** Убрать «висячие» строки принтера/устройства в ledger, если в основной базе ремонт уже выдан/закрыт */
+  for (const r of repairs) {
+    if ((r.locationStatus ?? '') !== 'issued') continue;
+    const hasActiveRepair = repairs.some(
+      other =>
+        other.id !== r.id &&
+        other.printerInventoryNumber === r.printerInventoryNumber &&
+        (other.locationStatus ?? 'waiting') !== 'issued' &&
+        (other.status === 'waiting' || other.status === 'in_repair' || other.status === 'repaired'),
+    );
+    if (hasActiveRepair) continue;
+    const id = printerByInv(r.printerInventoryNumber)?.programId ?? r.printerInventoryNumber;
+    const ex = byId.get(id);
+    if (ex && ex.type === 'Устройство') {
+      byId.delete(id);
+    }
+  }
+
   return Array.from(byId.values());
 }
 

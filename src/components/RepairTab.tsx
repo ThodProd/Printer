@@ -176,34 +176,49 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       }
     });
 
-    store.setWarehouseLedger(prev => ({
-      ...prev,
-      shipmentBatches: prev.shipmentBatches.map(b => {
-        const items = b.items.map(item => {
-          if (item.status !== 'at_refill') return item;
-          if (linkedIds.has(item.id)) {
+    store.setWarehouseLedger(prev => {
+      const nextItems = prev.items.map(item => {
+        if (
+          item.id === deviceWarehouseId ||
+          item.printerInventoryNumber === inv ||
+          linkedIds.has(item.id)
+        ) {
+          if (item.status === 'at_refill' || item.status === 'waiting') {
             return { ...item, status: 'ready' as const };
           }
-          if (
-            item.type === 'Устройство' &&
-            item.repairId === repairId &&
-            (item.id === deviceWarehouseId || item.printerInventoryNumber === inv)
-          ) {
-            return { ...item, status: 'ready' as const };
-          }
-          return item;
-        });
-        const hasAtRefill = items.some(i => i.status === 'at_refill');
-        const now = new Date().toISOString();
-        return {
-          ...b,
-          items,
-          ...(b.status === 'sent' && !hasAtRefill
-            ? { status: 'received' as const, dateReceived: b.dateReceived ?? now }
-            : {}),
-        };
-      }),
-    }));
+        }
+        return item;
+      });
+      return {
+        ...prev,
+        items: nextItems,
+        shipmentBatches: prev.shipmentBatches.map(b => {
+          const items = b.items.map(item => {
+            if (item.status !== 'at_refill') return item;
+            if (linkedIds.has(item.id)) {
+              return { ...item, status: 'ready' as const };
+            }
+            if (
+              item.type === 'Устройство' &&
+              item.repairId === repairId &&
+              (item.id === deviceWarehouseId || item.printerInventoryNumber === inv)
+            ) {
+              return { ...item, status: 'ready' as const };
+            }
+            return item;
+          });
+          const hasAtRefill = items.some(i => i.status === 'at_refill');
+          const now = new Date().toISOString();
+          return {
+            ...b,
+            items,
+            ...(b.status === 'sent' && !hasAtRefill
+              ? { status: 'received' as const, dateReceived: b.dateReceived ?? now }
+              : {}),
+          };
+        }),
+      };
+    });
 
     setShowFinish(null);
     setRepairDescription('');
