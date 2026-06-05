@@ -335,6 +335,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         addOp(`На заправке: ${cartridge.id}`, false);
       } else {
         store.updateCartridgeStatus(cartridge.id, 'waiting', 'Принят на склад (сдан на заправку)', employee, employee);
+        store.updateCartridge(cartridge.id, { linkedRepairId: undefined });
 
         // Save employee record if provided
         if (employee) {

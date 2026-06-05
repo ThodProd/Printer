@@ -39,6 +39,13 @@ import {
   warehouseShipmentBatchToExcelRows,
 } from '../utils/excelWarehouseExport';
 
+function isNestedUnderParent<T extends { id: string; parentDeviceId?: string }>(
+  item: T,
+  group: T[],
+): boolean {
+  return !!item.parentDeviceId && group.some(g => g.id === item.parentDeviceId);
+}
+
 /** Устройства сверху, под ними картриджи/драмы с тем же parentDeviceId; остальное в исходном порядке. */
 function sortStockRowsForDisplay<T extends { id: string; type: string; parentDeviceId?: string }>(
   rows: T[],
@@ -1364,7 +1371,7 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
                         </tr>
                       ) : (
                         waitingItemsOrdered.map(item => {
-                          const isChild = !!item.parentDeviceId;
+                          const isChild = isNestedUnderParent(item, waitingItemsOrdered);
                           return (
                           <tr key={item.id} className="hover:bg-slate-50/90 dark:hover:bg-slate-900/40">
                             <td className={`${warehouseTdClasses} text-center`}>
@@ -1587,7 +1594,7 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
                                 </thead>
                                 <tbody>
                                   {sortStockRowsForDisplay(batch.items).map(item => {
-                                    const isChild = !!item.parentDeviceId;
+                                    const isChild = isNestedUnderParent(item, batch.items);
                                     const printer = store.printers.find(
                                       p =>
                                         p.inventoryNumber === item.printerInventoryNumber ||
@@ -1784,7 +1791,7 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
                         </tr>
                       ) : (
                         readyItemsOrdered.map(item => {
-                          const isChild = !!item.parentDeviceId;
+                          const isChild = isNestedUnderParent(item, readyItemsOrdered);
                           return (
                             <tr key={item.id} className="hover:bg-slate-50/90">
                               <td className={`${warehouseTdClasses} font-mono font-bold`}>
@@ -1914,7 +1921,7 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
                               </thead>
                               <tbody>
                                 {sortStockRowsForDisplay(batch.items).map(item => {
-                                  const isChild = !!item.parentDeviceId;
+                                  const isChild = isNestedUnderParent(item, batch.items);
                                   return (
                                     <tr
                                       key={item.id}

@@ -84,6 +84,66 @@ function ColorDot({ color }: { color?: ConsumableColor }) {
   return <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border text-[9px] font-bold ${cfg.className}`}>{cfg.short}</span>;
 }
 
+type PrinterWorkflowStatus = 'none' | 'awaiting_ship' | 'in_repair' | 'at_refill' | 'ready';
+
+function normalizeWorkflowFilter(value: string): PrinterWorkflowStatus | 'all' {
+  if (value === 'waiting') return 'in_repair';
+  if (value === 'all' || value === 'awaiting_ship' || value === 'in_repair' || value === 'at_refill' || value === 'ready') {
+    return value;
+  }
+  return 'all';
+}
+
+function printerRowHighlightClass(workflow: PrinterWorkflowStatus): string {
+  switch (workflow) {
+    case 'awaiting_ship':
+      return 'bg-yellow-50/90 hover:bg-yellow-100/80';
+    case 'in_repair':
+      return 'bg-orange-50/90 hover:bg-orange-100/80';
+    case 'at_refill':
+      return 'bg-purple-50/90 hover:bg-purple-100/80';
+    case 'ready':
+      return 'bg-emerald-50/80 hover:bg-emerald-100/70';
+    default:
+      return 'hover:bg-blue-50/50';
+  }
+}
+
+function workflowFilterActiveClass(id: PrinterWorkflowStatus | 'all'): string {
+  switch (id) {
+    case 'awaiting_ship':
+      return 'bg-yellow-500 text-white';
+    case 'in_repair':
+      return 'bg-orange-500 text-white';
+    case 'at_refill':
+      return 'bg-purple-600 text-white';
+    case 'ready':
+      return 'bg-emerald-600 text-white';
+    default:
+      return 'bg-blue-600 text-white';
+  }
+}
+
+function PrinterWorkflowBadge({ workflow }: { workflow: PrinterWorkflowStatus }) {
+  if (workflow === 'none') return null;
+  const cfg =
+    workflow === 'awaiting_ship'
+      ? { label: 'К отправке', className: 'bg-yellow-100 text-yellow-800', title: 'Ожидает отправки' }
+      : workflow === 'in_repair'
+        ? { label: 'Ремонт', className: 'bg-orange-100 text-orange-800', title: 'В ремонте' }
+        : workflow === 'at_refill'
+          ? { label: 'Заправка', className: 'bg-purple-100 text-purple-700', title: 'На заправке' }
+          : { label: 'К выдаче', className: 'bg-emerald-100 text-emerald-800', title: 'Готов к выдаче' };
+  return (
+    <span
+      className={`shrink-0 px-1.5 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap ${cfg.className}`}
+      title={cfg.title}
+    >
+      {cfg.label}
+    </span>
+  );
+}
+
 function getConsumableLabel(cartridge: Cartridge, all: Cartridge[]): string {
   const sameType = all.filter(c => c.consumableType === cartridge.consumableType);
   const fromSlot = cartridge.consumableSlot;
@@ -128,6 +188,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     });
   };
   const [filterType, setFilterType] = useState<string>('all');
+  const [filterWorkflow, setFilterWorkflow] = useStickyState('printers_workflow_filter', 'all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [detailsPrinter, setDetailsPrinter] = useState<Printer | null>(null);
 
@@ -228,55 +289,6 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     );
   }
 
-  const filteredPrinters = useMemo(() => {
-    return store.printers.filter(p => {
-      const q = search.toLowerCase();
-      const matchSearch =
-        (p.inventoryNumber ?? '').toLowerCase().includes(q) ||
-        (p.model ?? '').toLowerCase().includes(q) ||
-        (p.department ?? '').toLowerCase().includes(q) ||
-        (p.boss ?? '').toLowerCase().includes(q) ||
-        getCartridges(p.inventoryNumber).some(c =>
-          (c.id ?? '').toLowerCase().includes(q) ||
-          (c.model ?? '').toLowerCase().includes(q) ||
-          (c.barcode ?? '').toLowerCase().includes(q),
-        ) ||
-        store.employees
-          .filter(e => e.printerInventoryNumber === p.inventoryNumber)
-          .some(e => (e.name ?? '').toLowerCase().includes(q)) ||
-        (p.programId ?? '').toLowerCase().includes(q);
-      const matchType = filterType === 'all' || p.printerType === filterType;
-      return matchSearch && matchType;
-    });
-  }, [store.printers, store.employees, search, filterType]);
-
-  const sortedFilteredPrinters = useMemo(() => {
-    const collator = new Intl.Collator('ru-RU', { numeric: true, sensitivity: 'base' });
-    const valueFor = (p: Printer): string | number => {
-      switch (sortKey) {
-        case 'programId': return p.programId ?? '';
-        case 'inventoryNumber': return p.inventoryNumber ?? '';
-        case 'printerType': return p.printerType ?? '';
-        case 'model': return p.model ?? '';
-        case 'department': return p.department ?? '';
-        case 'boss': return p.boss ?? '';
-        case 'employeesCount':
-          return store.employees.filter(e => e.printerInventoryNumber === p.inventoryNumber).length;
-        case 'cartridgesCount':
-          return getCartridges(p.inventoryNumber).length;
-      }
-    };
-    return [...filteredPrinters].sort((a, b) => {
-      const av = valueFor(a);
-      const bv = valueFor(b);
-      const base = typeof av === 'number' && typeof bv === 'number'
-        ? av - bv
-        : collator.compare(String(av), String(bv));
-      if (base !== 0) return sortDir === 'asc' ? base : -base;
-      return collator.compare(a.inventoryNumber, b.inventoryNumber);
-    });
-  }, [filteredPrinters, sortKey, sortDir, store.employees, store.cartridges]);
-
   const highlightedDisposedIds = useMemo(() => {
     const ids = new Set<string>();
     store.refillLog.forEach(entry => {
@@ -331,6 +343,112 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     },
     [mergedWarehouseItems],
   );
+
+  const getPrinterWorkflowStatus = useCallback(
+    (inv: string): PrinterWorkflowStatus => {
+      const carts = getCartridges(inv);
+      const hasCartAwaiting = carts.some(c => cartridgeDisplayStatus(c) === 'waiting');
+      const hasCartAtRefill = carts.some(c => cartridgeDisplayStatus(c) === 'at_refill');
+      const hasCartReady = carts.some(c => {
+        const s = cartridgeDisplayStatus(c);
+        return s === 'ready' || s === 'received_from_refill';
+      });
+
+      const activeRepair = store.repairs.find(
+        r =>
+          r.printerInventoryNumber === inv &&
+          (r.locationStatus ?? 'waiting') !== 'issued' &&
+          (r.status === 'waiting' || r.status === 'in_repair' || r.status === 'repaired'),
+      );
+      if (activeRepair) {
+        const ls = activeRepair.locationStatus ?? 'waiting';
+        if (ls === 'ready') return 'ready';
+        if (ls === 'at_refill') return 'in_repair';
+        if (ls === 'waiting') return 'awaiting_ship';
+      }
+
+      if (hasCartReady) return 'ready';
+      if (hasCartAtRefill) return 'at_refill';
+      if (hasCartAwaiting) return 'awaiting_ship';
+      return 'none';
+    },
+    [store.repairs, store.cartridges, cartridgeDisplayStatus],
+  );
+
+  const workflowCounts = useMemo(() => {
+    let awaitingShip = 0;
+    let inRepair = 0;
+    let atRefill = 0;
+    let ready = 0;
+    for (const p of store.printers) {
+      const w = getPrinterWorkflowStatus(p.inventoryNumber);
+      if (w === 'awaiting_ship') awaitingShip += 1;
+      else if (w === 'in_repair') inRepair += 1;
+      else if (w === 'at_refill') atRefill += 1;
+      else if (w === 'ready') ready += 1;
+    }
+    return { awaitingShip, inRepair, atRefill, ready };
+  }, [store.printers, getPrinterWorkflowStatus]);
+
+  const filteredPrinters = useMemo(() => {
+    return store.printers.filter(p => {
+      const q = search.toLowerCase().trim();
+      const workflow = getPrinterWorkflowStatus(p.inventoryNumber);
+      const carts = getCartridges(p.inventoryNumber);
+      const hasCartAwaiting = carts.some(c => cartridgeDisplayStatus(c) === 'waiting');
+      const hasCartAtRefill = carts.some(c => cartridgeDisplayStatus(c) === 'at_refill');
+      const workflowFilter = normalizeWorkflowFilter(filterWorkflow);
+      const matchWorkflow = workflowFilter === 'all' || workflow === workflowFilter;
+      const matchSearch =
+        !q ||
+        (p.inventoryNumber ?? '').toLowerCase().includes(q) ||
+        (p.model ?? '').toLowerCase().includes(q) ||
+        (p.department ?? '').toLowerCase().includes(q) ||
+        (p.boss ?? '').toLowerCase().includes(q) ||
+        carts.some(c =>
+          (c.id ?? '').toLowerCase().includes(q) ||
+          (c.model ?? '').toLowerCase().includes(q) ||
+          (c.barcode ?? '').toLowerCase().includes(q),
+        ) ||
+        store.employees
+          .filter(e => e.printerInventoryNumber === p.inventoryNumber)
+          .some(e => (e.name ?? '').toLowerCase().includes(q)) ||
+        (p.programId ?? '').toLowerCase().includes(q) ||
+        ((q.includes('ожида') || q.includes('отправ')) && (workflow === 'awaiting_ship' || hasCartAwaiting)) ||
+        (q.includes('ремонт') && workflow === 'in_repair') ||
+        (q.includes('заправк') && (workflow === 'at_refill' || hasCartAtRefill)) ||
+        ((q.includes('готов') || q.includes('выдач')) && workflow === 'ready');
+      const matchType = filterType === 'all' || p.printerType === filterType;
+      return matchSearch && matchType && matchWorkflow;
+    });
+  }, [store.printers, store.employees, store.cartridges, search, filterType, filterWorkflow, getPrinterWorkflowStatus, cartridgeDisplayStatus]);
+
+  const sortedFilteredPrinters = useMemo(() => {
+    const collator = new Intl.Collator('ru-RU', { numeric: true, sensitivity: 'base' });
+    const valueFor = (p: Printer): string | number => {
+      switch (sortKey) {
+        case 'programId': return p.programId ?? '';
+        case 'inventoryNumber': return p.inventoryNumber ?? '';
+        case 'printerType': return p.printerType ?? '';
+        case 'model': return p.model ?? '';
+        case 'department': return p.department ?? '';
+        case 'boss': return p.boss ?? '';
+        case 'employeesCount':
+          return store.employees.filter(e => e.printerInventoryNumber === p.inventoryNumber).length;
+        case 'cartridgesCount':
+          return getCartridges(p.inventoryNumber).length;
+      }
+    };
+    return [...filteredPrinters].sort((a, b) => {
+      const av = valueFor(a);
+      const bv = valueFor(b);
+      const base = typeof av === 'number' && typeof bv === 'number'
+        ? av - bv
+        : collator.compare(String(av), String(bv));
+      if (base !== 0) return sortDir === 'asc' ? base : -base;
+      return collator.compare(a.inventoryNumber, b.inventoryNumber);
+    });
+  }, [filteredPrinters, sortKey, sortDir, store.employees, store.cartridges]);
 
   /** Списан/заменён по статусу; подсветка по журналу не перекрывает «Готов к выдаче» и др. рабочие статусы. */
   const isDisposedLike = (c: Cartridge) => {
@@ -865,12 +983,15 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const PrinterCard = ({ printer }: { printer: Printer }) => {
     const carts = getCartridges(printer.inventoryNumber);
     const inRepair = repairCount(printer.inventoryNumber);
+    const workflow = getPrinterWorkflowStatus(printer.inventoryNumber);
     const isExpanded = expandedId === printer.inventoryNumber;
     const printerEmployees = store.employees.filter(e => e.printerInventoryNumber === printer.inventoryNumber);
 
     return (
-      <div className={`bg-white rounded-xl shadow-sm border flex flex-col ${
-        printer.printerType === 'mfu' ? 'border-purple-100' : 'border-gray-100'
+      <div className={`rounded-xl shadow-sm border flex flex-col ${
+        workflow !== 'none'
+          ? `${printerRowHighlightClass(workflow)} border-orange-200/60`
+          : `bg-white ${printer.printerType === 'mfu' ? 'border-purple-100' : 'border-gray-100'}`
       }`}>
         <div className="p-4">
           {/* Header */}
@@ -1065,7 +1186,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         )}
 
         {/* Actions */}
-        <div className="px-4 pb-3 pt-2 flex space-x-2">
+        <div className="px-4 pb-3 pt-2 flex items-center space-x-2">
+          <PrinterWorkflowBadge workflow={workflow} />
           <button
             onClick={() => openEdit(printer)}
             className="flex-1 py-1.5 border rounded text-xs text-gray-600 hover:bg-gray-50 flex items-center justify-center space-x-1"
@@ -1147,12 +1269,13 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
           <tbody className="divide-y">
             {sortedFilteredPrinters.map(p => {
               const carts = getCartridges(p.inventoryNumber);
+              const workflow = getPrinterWorkflowStatus(p.inventoryNumber);
               const printerEmployees = store.employees.filter(e => e.printerInventoryNumber === p.inventoryNumber);
               return (
                 <tr
                   key={p.inventoryNumber}
                   onClick={event => openDetailsFromRow(event, p)}
-                  className="hover:bg-blue-50/50 cursor-pointer"
+                  className={`cursor-pointer ${printerRowHighlightClass(workflow)}`}
                   title="Открыть карточку устройства"
                 >
                   <td className="px-4 py-3">
@@ -1169,8 +1292,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}</td>
                   <td className="px-4 py-3"><PrinterTypeBadge type={p.printerType} /></td>
                   <td className="px-4 py-3 font-semibold">
-                    <span className="inline-flex items-center gap-1.5 flex-wrap">
-                      <span>{p.model}</span>
+                    <span className="inline-flex items-center gap-1.5 min-w-0">
+                      <span className="truncate">{p.model}</span>
                       {p.firmwareFlashed && (
                         <span
                           className="shrink-0 inline-block w-1.5 h-1.5 rounded-full bg-red-500 ring-2 ring-red-200"
@@ -1216,7 +1339,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     </div>
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex justify-end gap-2">
+                    <div className="flex justify-end items-center gap-2">
+                      <PrinterWorkflowBadge workflow={workflow} />
                       <button onClick={() => openEdit(p)}
                         className="px-2 py-1 border rounded text-xs text-gray-600 hover:bg-gray-50">
                         Редактировать
@@ -1264,6 +1388,27 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               </button>
             ))}
           </div>
+          <div className="flex rounded-lg border overflow-hidden text-xs font-semibold">
+            {([
+              { id: 'all' as const, label: 'Все статусы' },
+              { id: 'awaiting_ship' as const, label: `Ожидает отправки (${workflowCounts.awaitingShip})` },
+              { id: 'in_repair' as const, label: `В ремонте (${workflowCounts.inRepair})` },
+              { id: 'at_refill' as const, label: `На заправке (${workflowCounts.atRefill})` },
+              { id: 'ready' as const, label: `Готов к выдаче (${workflowCounts.ready})` },
+            ]).map(({ id, label }) => (
+              <button
+                key={id}
+                onClick={() => setFilterWorkflow(id)}
+                className={`px-3 py-2 transition-colors whitespace-nowrap ${
+                  normalizeWorkflowFilter(filterWorkflow) === id
+                    ? workflowFilterActiveClass(id)
+                    : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
         <button
           onClick={openAdd}
@@ -1286,10 +1431,22 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
       <div className="text-sm text-gray-500">
         Всего: <strong>{store.printers.length}</strong>
-        {search && <span> · найдено: <strong>{filteredPrinters.length}</strong></span>}
+        {(search || filterWorkflow !== 'all') && (
+          <span> · найдено: <strong>{filteredPrinters.length}</strong></span>
+        )}
         {' · '}Принтеров: <strong>{store.printers.filter(p => p.printerType === 'printer').length}</strong>
         {' · '}МФУ: <strong>{store.printers.filter(p => p.printerType === 'mfu').length}</strong>
-        {customTypes.length > 0 && <span>{' · '}Прочие: <strong>{store.printers.filter(p => p.printerType !== 'printer' && p.printerType !== 'mfu').length}</strong></span>}
+        {customTypes.length > 0 && (
+          <span>{' · '}Прочие: <strong>{store.printers.filter(p => p.printerType !== 'printer' && p.printerType !== 'mfu').length}</strong></span>
+        )}
+        {' · '}
+        <span className="text-yellow-700">Ожидает отправки: <strong>{workflowCounts.awaitingShip}</strong></span>
+        {' · '}
+        <span className="text-orange-700">В ремонте: <strong>{workflowCounts.inRepair}</strong></span>
+        {' · '}
+        <span className="text-purple-700">На заправке: <strong>{workflowCounts.atRefill}</strong></span>
+        {' · '}
+        <span className="text-emerald-700">Готов к выдаче: <strong>{workflowCounts.ready}</strong></span>
       </div>
 
       {printStatus && (

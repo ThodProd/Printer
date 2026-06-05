@@ -46,6 +46,8 @@ function resolveParentDeviceId(
   if (!c.linkedRepairId) return undefined;
   const r = repairs.find(rep => rep.id === c.linkedRepairId);
   if (!r) return undefined;
+  if ((r.locationStatus ?? '') === 'issued') return undefined;
+  if (r.status !== 'waiting' && r.status !== 'in_repair' && r.status !== 'repaired') return undefined;
   const p = printers.find(pr => pr.inventoryNumber === r.printerInventoryNumber);
   return p?.programId ?? r.printerInventoryNumber;
 }
@@ -120,8 +122,7 @@ export function mergeLedgerWithStore(
   for (const c of cartridges) {
     let fromCart = warehouseItemFromCartridge(c, printerByInv(c.printerInventoryNumber));
     if (!fromCart) continue;
-    const parentDeviceId =
-      resolveParentDeviceId(c, repairs, printers) ?? fromCart.parentDeviceId;
+    const parentDeviceId = resolveParentDeviceId(c, repairs, printers);
     fromCart = { ...fromCart, parentDeviceId };
     const existing = byId.get(c.id);
     /**
@@ -141,7 +142,7 @@ export function mergeLedgerWithStore(
           currentBatchId: fromCart.status === 'at_refill' ? existing.currentBatchId : undefined,
           whoPickedUp: undefined,
           issueDate: undefined,
-          parentDeviceId: parentDeviceId ?? existing.parentDeviceId,
+          parentDeviceId,
         });
       }
       continue;
@@ -154,7 +155,7 @@ export function mergeLedgerWithStore(
         currentBatchId: fromCart.status === 'at_refill' ? existing.currentBatchId : undefined,
         whoPickedUp: existing.whoPickedUp,
         issueDate: existing.issueDate,
-        parentDeviceId: parentDeviceId ?? existing.parentDeviceId,
+        parentDeviceId,
       });
     } else {
       byId.set(c.id, fromCart);
