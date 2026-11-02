@@ -1,9 +1,13 @@
+import Pagination, { usePage } from './Pagination';
+import { groupBy } from '../utils/indexes';
+import { ask, notify } from '../utils/dialogs';
 
 import React, { useEffect, useState, useMemo } from 'react';
 import {
-  Plus, Printer as PrinterIcon, User, MapPin, Search, Edit2, Wrench, X, Hash,
-  ChevronDown, ChevronUp, Calendar, DollarSign, Users, Trash2, RefreshCw,
-  Barcode as BarcodeIcon, Tag,
+  Plus, Printer as PrinterIcon, User, Search, Edit2, X,
+  Users, Trash2, RefreshCw,
+  Barcode as BarcodeIcon,
+  ArrowUpDown, ChevronUp, ChevronDown,
 } from 'lucide-react';
 import {
   Printer, Cartridge, STATUS_LABELS, STATUS_COLORS, ConsumableType,
@@ -49,6 +53,20 @@ const CONSUMABLE_COLORS: Array<{ id: ConsumableColor; label: string; short: stri
   { id: 'yellow', label: 'Жёлтый', short: 'Ж', className: 'bg-yellow-300 text-yellow-900 border-yellow-300' },
 ];
 
+type PrinterSortKey = 'programId' | 'inventoryNumber' | 'printerType' | 'model' | 'department' | 'boss' | 'employees' | 'consumables';
+type PrinterSort = { key: PrinterSortKey | null; direction: 'asc' | 'desc' };
+const PRINTER_SORT_STORAGE = 'printer_table_sort';
+const printerCollator = new Intl.Collator('ru', { numeric: true, sensitivity: 'base' });
+
+function initialPrinterSort(): PrinterSort {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PRINTER_SORT_STORAGE) ?? 'null') as PrinterSort | null;
+    const keys: PrinterSortKey[] = ['programId', 'inventoryNumber', 'printerType', 'model', 'department', 'boss', 'employees', 'consumables'];
+    if (saved && (saved.key === null || keys.includes(saved.key)) && (saved.direction === 'asc' || saved.direction === 'desc')) return saved;
+  } catch { /* keep the unsorted database order */ }
+  return { key: null, direction: 'asc' };
+}
+
 function ColorDot({ color }: { color?: ConsumableColor }) {
   const cfg = CONSUMABLE_COLORS.find(c => c.id === color);
   if (!cfg) return null;
@@ -75,7 +93,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [sort, setSort] = useState<PrinterSort>(initialPrinterSort);
   const [detailsPrinter, setDetailsPrinter] = useState<Printer | null>(null);
 
   useEffect(() => {
@@ -85,6 +103,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     window.addEventListener('app-scanner-input', onScan as EventListener);
     return () => window.removeEventListener('app-scanner-input', onScan as EventListener);
   }, []);
+
+  useEffect(() => { localStorage.setItem(PRINTER_SORT_STORAGE, JSON.stringify(sort)); }, [sort]);
 
   const [showEmployeeModal, setShowEmployeeModal] = useState<string | null>(null);
   const [newEmployee, setNewEmployee] = useState('');
@@ -96,7 +116,6 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [cartPrintStatus, setCartPrintStatus] = useState<string | null>(null);
 
   const [printStatus, setPrintStatus] = useState<{ id: string; text: string; ok: boolean } | null>(null);
-  const showCards = (store.settings.printersViewMode ?? 'list') === 'cards';
 
   // Gather unique custom types for filter
   const customTypes = useMemo(() => {
@@ -109,32 +128,53 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     return Array.from(types);
   }, [store.printers]);
 
+  const employeesByPrinter = useMemo(() => groupBy(store.employees, e => e.printerInventoryNumber), [store.employees]);
+  const cartridgesByPrinter = useMemo(() => groupBy(store.cartridges, c => c.printerInventoryNumber), [store.cartridges]);
   const filteredPrinters = useMemo(() => {
-    return store.printers.filter(p => {
-      const q = search.toLowerCase();
+    const q = search.toLowerCase();
+    const result = store.printers.filter(p => {
+      const printerCartridges = cartridgesByPrinter.get(p.inventoryNumber) ?? [];
       const matchSearch =
         p.inventoryNumber.toLowerCase().includes(q) ||
         p.model.toLowerCase().includes(q) ||
         p.department.toLowerCase().includes(q) ||
         p.boss.toLowerCase().includes(q) ||
-        store.employees
-          .filter(e => e.printerInventoryNumber === p.inventoryNumber)
+        (employeesByPrinter.get(p.inventoryNumber) ?? [])
           .some(e => e.name.toLowerCase().includes(q)) ||
+        printerCartridges.some(cartridge => cartridge.id.toLowerCase().includes(q) || cartridge.barcode.toLowerCase().includes(q)) ||
         (p.programId ?? '').toLowerCase().includes(q);
       const matchType = filterType === 'all' || p.printerType === filterType;
       return matchSearch && matchType;
     });
-  }, [store.printers, store.employees, search, filterType]);
+    if (!sort.key) return result;
+    const value = (printer: Printer) => {
+      if (sort.key === 'employees') return (employeesByPrinter.get(printer.inventoryNumber) ?? []).map(employee => employee.name).join(', ');
+      if (sort.key === 'consumables') {
+        const items = cartridgesByPrinter.get(printer.inventoryNumber) ?? [];
+        return `${String(items.length).padStart(6, '0')} ${items.map(cartridge => cartridge.id).join(', ')}`;
+      }
+      return String(printer[sort.key as keyof Printer] ?? '');
+    };
+    return [...result].sort((a, b) => printerCollator.compare(value(a), value(b)) * (sort.direction === 'asc' ? 1 : -1));
+  }, [store.printers, employeesByPrinter, cartridgesByPrinter, search, filterType, sort]);
 
-  const printers = filteredPrinters.filter(p => p.printerType === 'printer');
-  const mfus = filteredPrinters.filter(p => p.printerType === 'mfu');
-  const others = filteredPrinters.filter(p => p.printerType !== 'printer' && p.printerType !== 'mfu');
+  const toggleSort = (key: PrinterSortKey) => setSort(current => current.key === key
+    ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+    : { key, direction: 'asc' });
+
+  const SortableHeader = ({ column, children, right = false }: { column: PrinterSortKey; children: React.ReactNode; right?: boolean }) => (
+    <th className={`px-4 py-3 font-semibold ${right ? 'text-right' : ''}`} aria-sort={sort.key === column ? (sort.direction === 'asc' ? 'ascending' : 'descending') : 'none'}>
+      <button type="button" onClick={() => toggleSort(column)} className={`inline-flex items-center gap-1 whitespace-nowrap hover:text-blue-700 ${right ? 'ml-auto' : ''}`} title="Нажмите для сортировки">
+        <span>{children}</span>{sort.key !== column ? <ArrowUpDown size={11} className="text-gray-300" /> : sort.direction === 'asc' ? <ChevronUp size={12} className="text-blue-600" /> : <ChevronDown size={12} className="text-blue-600" />}
+      </button>
+    </th>
+  );
+
+  const printerPage = usePage(filteredPrinters);
 
   const getCartridges = (invNum: string) =>
-    store.cartridges.filter((c: Cartridge) => c.printerInventoryNumber === invNum);
+    (cartridgesByPrinter.get(invNum) ?? []);
 
-  const repairCount = (invNum: string) =>
-    store.repairs.filter(r => r.printerInventoryNumber === invNum && r.status !== 'repaired').length;
 
   const openAdd = () => {
     setEditPrinter(null);
@@ -157,10 +197,13 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const handleSavePrinter = (e: React.FormEvent) => {
     e.preventDefault();
-    const models = cartridgeModelsText
+    const enteredModels = cartridgeModelsText
       .split(',')
       .map(s => s.trim())
       .filter(Boolean);
+    const isNew = !editPrinter;
+    const catalogEntry = store.modelCatalog.find(entry => entry.printerModel.trim().toLocaleLowerCase('ru') === newPrinter.model.trim().toLocaleLowerCase('ru'));
+    const models = isNew && enteredModels.length === 0 ? (catalogEntry?.cartridgeModels ?? []) : enteredModels;
     const finalType = showCustomType && customTypeInput.trim()
       ? customTypeInput.trim()
       : newPrinter.printerType;
@@ -168,9 +211,12 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       ...newPrinter,
       printerType: finalType,
       cartridgeModels: models,
+      drumModels: catalogEntry?.drumModels ?? newPrinter.drumModels ?? [],
       programId: newPrinter.programId || store.generatePrinterId(),
+      isDecommissioned: Boolean(newPrinter.isDecommissioned),
+      decommissionedAt: newPrinter.isDecommissioned ? (newPrinter.decommissionedAt || new Date().toISOString()) : undefined,
+      firmwareFlashed: editPrinter?.firmwareFlashed ? true : Boolean(newPrinter.firmwareFlashed),
     };
-    const isNew = !editPrinter;
     store.addPrinter(printer);
 
     if (isNew) {
@@ -198,9 +244,9 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setEditPrinter(null);
   };
 
-  const handleDeletePrinter = () => {
+  const handleDeletePrinter = async () => {
     if (!editPrinter) return;
-    if (confirm(`Удалить принтер ${editPrinter.inventoryNumber}? Это действие нельзя отменить.`)) {
+    if (await ask(`Удалить принтер ${editPrinter.inventoryNumber}? Это действие нельзя отменить.`)) {
       store.removePrinter(editPrinter.inventoryNumber);
       setShowAddPrinter(false);
       setEditPrinter(null);
@@ -242,7 +288,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     };
     store.addCartridge(cartridge);
 
-    if (addCart.printAfter && store.settings.labelPrinterName && window.electronAPI) {
+    if (addCart.printAfter && store.settings.labelPrinterName && window.desktopAPI) {
       const template = getTemplate(store.settings);
       const printer = store.printers.find(p => p.inventoryNumber === addCart.printerInv);
       const tspl = buildTSPLLabel(template, store.settings, {
@@ -259,7 +305,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         consumableType: addCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
         status: STATUS_LABELS.on_hand,
       });
-      await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
     }
 
     setAddCart(null);
@@ -268,7 +314,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const handleEditCartridge = (e: React.FormEvent) => {
     e.preventDefault();
     if (editPin !== pinCode) {
-      alert('Неверный PIN-код');
+      void notify('Неверный PIN-код');
       return;
     }
     if (!editCartridgeId) return;
@@ -279,9 +325,9 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setCartPrintStatus(null);
   };
 
-  const handleDeleteCartridge = () => {
+  const handleDeleteCartridge = async () => {
     if (!editCartridgeId) return;
-    if (confirm(`Удалить расходник ${editCartridgeId}? Это действие нельзя отменить.`)) {
+    if (await ask(`Удалить расходник ${editCartridgeId}? Это действие нельзя отменить.`)) {
       store.removeCartridge(editCartridgeId);
       setEditCartridgeId(null);
       setEditPin('');
@@ -325,7 +371,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       else setCartPrintStatus('Принтер не выбран в Настройках');
       return;
     }
-    if (!window.electronAPI) {
+    if (!window.desktopAPI) {
       if (cartId) setPrintStatus({ id: cartId, text: 'Только в desktop-версии', ok: false });
       else setCartPrintStatus('Только в desktop-версии');
       return;
@@ -346,7 +392,12 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       consumableType: cart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cart.status],
     });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    store.recordAction({
+      category: 'cartridge', entityId: cart.id, cartridgeId: cart.id, cartridgeModel: cart.model,
+      consumableType: cart.consumableType, printerInventoryNumber: cart.printerInventoryNumber,
+      action: res.success ? 'Напечатана этикетка расходника' : 'Ошибка печати этикетки расходника', details: res.error,
+    });
     if (cartId) {
       setPrintStatus({ id: cartId, text: res.success ? 'Отправлено!' : (res.error ?? 'Ошибка'), ok: res.success });
       setTimeout(() => setPrintStatus(null), 3000);
@@ -360,7 +411,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       setPrintStatus({ id: printer.inventoryNumber, text: 'Принтер этикеток не выбран', ok: false });
       return;
     }
-    if (!window.electronAPI) {
+    if (!window.desktopAPI) {
       setPrintStatus({ id: printer.inventoryNumber, text: 'Только в desktop-версии', ok: false });
       return;
     }
@@ -376,8 +427,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       printerType: printer.printerType,
       commissionDate: printer.commissionDate,
       balanceCost: printer.balanceCost,
+      firmwareFlashed: Boolean(printer.firmwareFlashed),
     });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    store.recordAction({
+      category: 'printer', entityId: printer.programId ?? printer.inventoryNumber,
+      printerInventoryNumber: printer.inventoryNumber, printerModel: printer.model,
+      action: res.success ? 'Напечатана этикетка принтера' : 'Ошибка печати этикетки принтера', details: res.error,
+    });
     setPrintStatus({
       id: printer.inventoryNumber,
       text: res.success ? 'Этикетка принтера отправлена!' : (res.error ?? 'Ошибка'),
@@ -405,264 +462,32 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setDetailsPrinter(printer);
   };
 
-  const PrinterCard = ({ printer }: { printer: Printer }) => {
-    const carts = getCartridges(printer.inventoryNumber);
-    const inRepair = repairCount(printer.inventoryNumber);
-    const isExpanded = expandedId === printer.inventoryNumber;
-    const printerEmployees = store.employees.filter(e => e.printerInventoryNumber === printer.inventoryNumber);
-
-    return (
-      <div className={`bg-white rounded-xl shadow-sm border flex flex-col ${
-        printer.printerType === 'mfu' ? 'border-purple-100' : 'border-gray-100'
-      }`}>
-        <div className="p-4">
-          {/* Header */}
-          <div className="flex items-start space-x-3 mb-3">
-            <div className={`p-2 rounded-lg shrink-0 ${printer.printerType === 'mfu' ? 'bg-purple-50 text-purple-600' : 'bg-blue-50 text-blue-600'}`}>
-              <PrinterIcon size={20} />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="font-bold text-sm leading-tight truncate">{printer.model}</div>
-              <div className="flex items-center space-x-2 mt-0.5 flex-wrap gap-1">
-                <span className="font-bold text-sm text-gray-600">{printer.inventoryNumber}</span>
-                <PrinterTypeBadge type={printer.printerType} />
-              </div>
-              {/* Program ID badge */}
-              {printer.programId && (
-                <div className="flex items-center space-x-1 mt-1">
-                  <Tag size={10} className="text-gray-400" />
-                  <span className="text-xs font-mono text-gray-400">ID: {printer.programId}</span>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="space-y-1 text-xs text-gray-600">
-            {printer.department && (
-              <div className="flex items-center space-x-1.5">
-                <MapPin size={12} className="text-gray-400 shrink-0" />
-                <span>{printer.department}</span>
-              </div>
-            )}
-            {printer.boss && (
-              <div className="flex items-center space-x-1.5">
-                <Hash size={12} className="text-gray-400 shrink-0" />
-                <span className="font-medium">{printer.boss}</span>
-              </div>
-            )}
-            {printer.commissionDate && (
-              <div className="flex items-center space-x-1.5">
-                <Calendar size={12} className="text-gray-400 shrink-0" />
-                <span>{printer.commissionDate}</span>
-              </div>
-            )}
-            {printer.balanceCost && (
-              <div className="flex items-center space-x-1.5">
-                <DollarSign size={12} className="text-gray-400 shrink-0" />
-                <span>{printer.balanceCost} ₽</span>
-              </div>
-            )}
-          </div>
-
-          {inRepair > 0 && (
-            <div className="mt-2 px-2 py-1 bg-orange-50 text-orange-700 text-xs rounded font-semibold flex items-center space-x-1">
-              <Wrench size={11} />
-              <span>{inRepair} в ремонте</span>
-            </div>
-          )}
-
-          {/* Print buttons row for printer itself */}
-          <div className="mt-3 flex space-x-1">
-            <button
-              onClick={() => handlePrintPrinter(printer)}
-              title="Напечатать штрих-код принтера"
-              className="flex-1 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-xs font-bold hover:bg-blue-100 flex items-center justify-center space-x-1"
-            >
-              <BarcodeIcon size={12} />
-              <span>Штрих-код принтера</span>
-            </button>
-          </div>
-        </div>
-
-        {/* Consumables section */}
-        <div className="border-t px-4 pb-1 pt-3">
-          <div className="flex justify-between items-center mb-2">
-            <span className="text-xs font-bold text-gray-400 uppercase">
-              Расходники ({carts.length})
-            </span>
-            <div className="flex items-center space-x-2">
-              <button
-                onClick={() => setExpandedId(isExpanded ? null : printer.inventoryNumber)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                {isExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-              </button>
-              <button
-                onClick={() => openAddCart(printer.inventoryNumber)}
-                className="text-blue-600 hover:text-blue-700 text-xs font-bold flex items-center space-x-0.5"
-              >
-                <Plus size={12} />
-                <span>Добавить</span>
-              </button>
-            </div>
-          </div>
-
-          {isExpanded && (
-            <div className="space-y-1 mb-2 max-h-48 overflow-y-auto">
-              {carts.length === 0 ? (
-                <div className="text-xs text-gray-300 italic py-2 text-center">Нет расходников</div>
-              ) : (
-                carts.map(c => (
-                  <div key={c.id} className="flex justify-between items-center text-xs p-1.5 bg-gray-50 rounded">
-                    <div className="flex items-center space-x-1.5 min-w-0">
-                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${c.consumableType === 'drum' ? 'bg-orange-400' : 'bg-blue-400'}`} />
-                      <ColorDot color={c.color} />
-                      <button
-                        onClick={() => handlePrintCartridge(c.id)}
-                        className="font-mono font-bold text-gray-700 truncate hover:text-blue-600 hover:underline"
-                        title="Напечатать этикетку расходника"
-                      >
-                        {getConsumableLabel(c, carts)}
-                      </button>
-                      <span className="text-gray-400 truncate">{c.model}</span>
-                      {c.consumableType === 'drum' && (
-                        <span className="text-orange-600 font-bold shrink-0">DRUM</span>
-                      )}
-                    </div>
-                    <div className="flex items-center space-x-1 shrink-0">
-                      <span className={`px-1.5 py-0.5 rounded-full font-bold ${STATUS_COLORS[c.status]}`} style={{ fontSize: '10px' }}>
-                        {STATUS_LABELS[c.status]}
-                      </span>
-                      {/* Print barcode button for cartridge */}
-                      <button
-                        onClick={() => handlePrintCartridge(c.id)}
-                        title="Напечатать штрих-код"
-                        className="p-0.5 text-blue-400 hover:text-blue-600"
-                      >
-                        <BarcodeIcon size={12} />
-                      </button>
-                      <button
-                        onClick={() => {
-                          setEditCartridgeId(c.id);
-                          setEditCartridgeModel(c.model);
-                          setEditCartridgeColor(c.color ?? '');
-                          setEditPin('');
-                          setCartPrintStatus(null);
-                        }}
-                        className="text-gray-300 hover:text-blue-500 ml-1"
-                      >
-                        <Edit2 size={11} />
-                      </button>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
-          {!isExpanded && carts.length > 0 && (
-            <div className="flex flex-wrap gap-1 mb-2">
-              {carts.slice(0, 2).map(c => (
-                <button
-                  key={c.id}
-                  onClick={() => handlePrintCartridge(c.id)}
-                  className={`text-xs px-1.5 py-0.5 rounded-full font-bold hover:ring-2 hover:ring-blue-200 ${STATUS_COLORS[c.status]}`}
-                  title="Напечатать этикетку расходника"
-                >
-                  <ColorDot color={c.color} />
-                  {getConsumableLabel(c, carts)}
-                </button>
-              ))}
-              {carts.length > 2 && (
-                <span className="text-xs text-gray-400">+{carts.length - 2}</span>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Employees */}
-        {printerEmployees.length > 0 && (
-          <div className="border-t px-4 py-2">
-            <div className="text-xs text-gray-400 font-bold uppercase mb-1">Сотрудники</div>
-            <div className="flex flex-wrap gap-1">
-              {printerEmployees.map(emp => (
-                <div key={emp.id} className="flex items-center space-x-1 bg-gray-100 rounded px-2 py-0.5 text-xs">
-                  <User size={10} />
-                  <span>{emp.name}</span>
-                  <button onClick={() => store.removeEmployee(emp.id)} className="text-red-300 hover:text-red-500">
-                    <X size={10} />
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Actions */}
-        <div className="px-4 pb-3 pt-2 flex space-x-2">
-          <button
-            onClick={() => openEdit(printer)}
-            className="flex-1 py-1.5 border rounded text-xs text-gray-600 hover:bg-gray-50 flex items-center justify-center space-x-1"
-          >
-            <Edit2 size={11} />
-            <span>Редактировать</span>
-          </button>
-          <button
-            onClick={() => setShowEmployeeModal(printer.inventoryNumber)}
-            className="py-1.5 px-3 border rounded text-xs text-gray-600 hover:bg-gray-50 flex items-center space-x-1"
-          >
-            <Users size={11} />
-          </button>
-        </div>
-      </div>
-    );
-  };
-
-  const Section = ({ title, items, color }: { title: string; items: Printer[]; color: string }) => (
-    <div className="space-y-3">
-      <div className={`flex items-center space-x-2 text-sm font-bold ${color} py-1 border-b`}>
-        <PrinterIcon size={16} />
-        <span>{title}</span>
-        <span className="ml-1 bg-gray-200 text-gray-600 rounded-full px-2 py-0.5 text-xs font-normal">
-          {items.length}
-        </span>
-      </div>
-      {items.length === 0 ? (
-        <div className="text-gray-300 italic text-sm py-4 text-center">Нет записей</div>
-      ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {items.map(p => <PrinterCard key={p.inventoryNumber} printer={p} />)}
-        </div>
-      )}
-    </div>
-  );
-
   const PrintersList = () => (
     <div className="bg-white rounded-xl border shadow-sm overflow-hidden">
       <div className="overflow-auto">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 border-b text-xs text-gray-500">
             <tr>
-              <th className="px-4 py-3 font-semibold">ID</th>
-              <th className="px-4 py-3 font-semibold">Инв. №</th>
-              <th className="px-4 py-3 font-semibold">Тип</th>
-              <th className="px-4 py-3 font-semibold">Модель</th>
-              <th className="px-4 py-3 font-semibold">Подразделение</th>
-              <th className="px-4 py-3 font-semibold">Мат. отв.</th>
-              <th className="px-4 py-3 font-semibold">Сотрудники</th>
-              <th className="px-4 py-3 font-semibold">Расходники</th>
+              <SortableHeader column="programId">ID</SortableHeader>
+              <SortableHeader column="inventoryNumber">Инв. №</SortableHeader>
+              <SortableHeader column="printerType">Тип</SortableHeader>
+              <SortableHeader column="model">Модель</SortableHeader>
+              <SortableHeader column="department">Подразделение</SortableHeader>
+              <SortableHeader column="boss">Мат. отв.</SortableHeader>
+              <SortableHeader column="employees">Сотрудники</SortableHeader>
+              <SortableHeader column="consumables">Расходники</SortableHeader>
               <th className="px-4 py-3 font-semibold text-right">Действия</th>
             </tr>
           </thead>
           <tbody className="divide-y">
-            {filteredPrinters.map(p => {
+            {printerPage.visible.map(p => {
               const carts = getCartridges(p.inventoryNumber);
-              const printerEmployees = store.employees.filter(e => e.printerInventoryNumber === p.inventoryNumber);
+              const printerEmployees = (employeesByPrinter.get(p.inventoryNumber) ?? []);
               return (
                 <tr
                   key={p.inventoryNumber}
                   onClick={event => openDetailsFromRow(event, p)}
-                  className="hover:bg-blue-50/50 cursor-pointer"
+                  className={`cursor-pointer ${p.isDecommissioned ? 'bg-amber-50/60 text-gray-500 hover:bg-amber-50' : 'hover:bg-blue-50/50'}`}
                   title="Открыть карточку устройства"
                 >
                   <td className="px-4 py-3">
@@ -676,9 +501,9 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       </button>
                     ) : '—'}
                   </td>
-                  <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}</td>
+                  <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}{p.isDecommissioned && <span className="ml-2 inline-flex rounded bg-amber-100 px-1.5 py-0.5 font-sans text-[9px] font-bold uppercase tracking-wide text-amber-800">Списан</span>}</td>
                   <td className="px-4 py-3"><PrinterTypeBadge type={p.printerType} /></td>
-                  <td className="px-4 py-3 font-semibold">{p.model}</td>
+                  <td className="px-4 py-3 font-semibold"><span className="inline-flex min-w-0 items-center gap-1.5"><span className="truncate">{p.model}</span>{p.firmwareFlashed && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500 ring-2 ring-red-200" title="Прошит" aria-label="Прошит" />}</span></td>
                   <td className="px-4 py-3 text-gray-600">{p.department || '—'}</td>
                   <td className="px-4 py-3 text-gray-600">{p.boss || '—'}</td>
                   <td className="px-4 py-3">
@@ -694,7 +519,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     <div className="flex flex-wrap gap-1">
                       {carts.slice(0, 3).map(c => (
                         <button key={c.id} onClick={() => handlePrintCartridge(c.id)}
-                          className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${STATUS_COLORS[c.status]}`}
+                          className={`ui-mini-pill px-1.5 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 ${STATUS_COLORS[c.status]}`}
                           title="Напечатать этикетку расходника">
                           <ColorDot color={c.color} />
                           {getConsumableLabel(c, carts)}
@@ -704,7 +529,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       {carts.length === 0 && <span className="text-gray-300 text-xs">нет</span>}
                       <button
                         onClick={() => openAddCart(p.inventoryNumber)}
-                        className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-100 hover:bg-blue-100"
+                        className="ui-mini-pill px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-100 hover:bg-blue-100"
                         title="Добавить расходник"
                       >
                         + Добавить
@@ -714,7 +539,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <td className="px-4 py-3">
                     <div className="flex justify-end gap-2">
                       <button onClick={() => openEdit(p)}
-                        className="px-2 py-1 border rounded text-xs text-gray-600 hover:bg-gray-50">
+                        className="ui-table-action px-2 py-1 border rounded text-xs text-gray-600 hover:bg-gray-50">
                         Редактировать
                       </button>
                     </div>
@@ -738,7 +563,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         <div className="flex items-center space-x-2">
           <div className="relative w-64">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
-            <input
+            <input data-scanner="true"
               type="text"
               value={search}
               onChange={e => setSearch(e.target.value)}
@@ -751,7 +576,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <button
                 key={t}
                 onClick={() => setFilterType(t)}
-                className={`px-3 py-2 transition-colors ${
+                className={`ui-filter-button px-3 py-2 transition-colors ${
                   filterType === t ? 'bg-blue-600 text-white' : 'bg-white text-gray-600 hover:bg-gray-50'
                 }`}
               >
@@ -769,16 +594,6 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </button>
       </div>
 
-      <label className="inline-flex items-center space-x-2 text-sm text-gray-600">
-        <input
-          type="checkbox"
-          checked={showCards}
-          onChange={e => store.setSettings({ ...store.settings, printersViewMode: e.target.checked ? 'cards' : 'list' })}
-          className="rounded"
-        />
-        <span>Показывать карточками</span>
-      </label>
-
       <div className="text-sm text-gray-500">
         Всего: <strong>{store.printers.length}</strong>
         {search && <span> · найдено: <strong>{filteredPrinters.length}</strong></span>}
@@ -795,24 +610,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
       )}
 
-      {showCards ? (
-        <>
-          {(filterType === 'all' || filterType === 'printer') && printers.length > 0 && (
-            <Section title="Принтеры" items={printers} color="text-blue-700" />
-          )}
-          {(filterType === 'all' || filterType === 'mfu') && mfus.length > 0 && (
-            <Section title="МФУ" items={mfus} color="text-purple-700" />
-          )}
-          {others.length > 0 && (
-            <Section title="Прочие устройства" items={others} color="text-teal-700" />
-          )}
-          {filteredPrinters.length === 0 && (
-            <div className="text-gray-300 italic text-sm py-8 text-center">Нет принтеров</div>
-          )}
-        </>
-      ) : (
-        <PrintersList />
-      )}
+      <Pagination {...printerPage} />
+      <PrintersList />
 
       {detailsPrinter && (() => {
         const carts = getCartridges(detailsPrinter.inventoryNumber);
@@ -824,7 +623,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               if (e.target === e.currentTarget) setDetailsPrinter(null);
             }}
           >
-            <div className="bg-white rounded-2xl max-w-3xl w-full shadow-2xl overflow-hidden" onMouseDown={e => e.stopPropagation()}>
+            <div data-testid="printer-details" className="bg-white rounded-2xl max-w-4xl w-full shadow-2xl overflow-hidden" onMouseDown={e => e.stopPropagation()}>
               <div className="bg-gradient-to-r from-blue-600 to-cyan-500 text-white p-5 flex items-start justify-between">
                 <div className="flex items-center gap-4">
                   <div className="h-20 w-24 rounded-2xl bg-white/20 border border-white/30 flex items-center justify-center">
@@ -832,47 +631,69 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </div>
                   <div>
                     <div className="text-xs uppercase opacity-75">Карточка устройства</div>
-                    <div className="text-xl font-bold">{detailsPrinter.model}</div>
+                    <div className="flex items-center gap-2 text-xl font-bold"><span>{detailsPrinter.model}</span>{detailsPrinter.firmwareFlashed && <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-white ring-2 ring-white/50" title="Прошит" aria-label="Прошит" />}</div>
                     <div className="text-sm opacity-90 font-mono">{detailsPrinter.inventoryNumber}</div>
+                    {detailsPrinter.isDecommissioned && <div className="mt-1 w-fit rounded bg-amber-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-amber-900">Списан</div>}
                     {detailsPrinter.programId && <div className="text-xs opacity-80 font-mono">ID: {detailsPrinter.programId}</div>}
                   </div>
                 </div>
-                <button onClick={() => setDetailsPrinter(null)} className="text-white/80 hover:text-white"><X size={22} /></button>
+                <button aria-label="Закрыть карточку" onClick={() => setDetailsPrinter(null)} className="text-white/80 hover:text-white"><X size={22} /></button>
               </div>
 
-              <div className="p-5 grid grid-cols-1 lg:grid-cols-3 gap-4">
-                <div className="lg:col-span-1 space-y-3">
+              <div className="p-5 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)] gap-5">
+                <div className="space-y-3">
                   <div className="p-3 bg-gray-50 rounded-xl text-sm space-y-2">
                     <div className="flex justify-between gap-3"><span className="text-gray-500">Тип</span><PrinterTypeBadge type={detailsPrinter.printerType} /></div>
                     <div className="flex justify-between gap-3"><span className="text-gray-500">Подразделение</span><strong className="text-right">{detailsPrinter.department || '—'}</strong></div>
                     <div className="flex justify-between gap-3"><span className="text-gray-500">Мат. отв.</span><strong className="text-right">{detailsPrinter.boss || '—'}</strong></div>
                     <div className="flex justify-between gap-3"><span className="text-gray-500">Дата ввода</span><strong>{detailsPrinter.commissionDate || '—'}</strong></div>
                     <div className="flex justify-between gap-3"><span className="text-gray-500">Стоимость</span><strong>{detailsPrinter.balanceCost || '—'}</strong></div>
+                    {detailsPrinter.firmwareFlashed && <div className="flex items-center justify-between gap-3 border-t border-gray-200 pt-2"><span className="text-gray-500">Прошивка</span><span className="inline-flex items-center gap-1.5 font-semibold text-red-700"><span className="inline-block h-2 w-2 rounded-full bg-red-500 ring-2 ring-red-200" />Прошит</span></div>}
+                    <label className="flex cursor-pointer items-center justify-between gap-3 border-t border-gray-200 pt-2">
+                      <span><span className="block text-gray-700">Списан</span><span className="block text-[10px] text-gray-400">Останется в базе и истории</span></span>
+                      <input type="checkbox" checked={Boolean(detailsPrinter.isDecommissioned)} onChange={event => {
+                        const isDecommissioned = event.target.checked;
+                        const updates = { isDecommissioned, decommissionedAt: isDecommissioned ? (detailsPrinter.decommissionedAt || new Date().toISOString()) : undefined };
+                        store.updatePrinter(detailsPrinter.inventoryNumber, updates);
+                        setDetailsPrinter({ ...detailsPrinter, ...updates });
+                      }} className="h-4 w-4 accent-amber-600" />
+                    </label>
                   </div>
                   <div className="flex gap-2">
-                    <button onClick={() => { setDetailsPrinter(null); openEdit(detailsPrinter); }} className="flex-1 py-2 border rounded-lg text-sm hover:bg-gray-50 flex items-center justify-center gap-1">
+                    <button onClick={() => { setDetailsPrinter(null); openEdit(detailsPrinter); }} className="ui-table-action flex-1 py-2 border rounded-lg text-sm hover:bg-gray-50 flex items-center justify-center gap-1">
                       <Edit2 size={14} /> Редактировать
                     </button>
-                    <button onClick={() => setShowEmployeeModal(detailsPrinter.inventoryNumber)} className="px-3 py-2 border rounded-lg text-sm hover:bg-gray-50">
+                    <button onClick={() => setShowEmployeeModal(detailsPrinter.inventoryNumber)} className="ui-table-action px-3 py-2 border rounded-lg text-sm hover:bg-gray-50">
                       <Users size={15} />
                     </button>
                   </div>
                 </div>
 
-                <div className="lg:col-span-2 space-y-4">
+                <div className="min-w-0 space-y-4">
                   <div>
                     <div className="text-xs uppercase text-gray-400 font-bold mb-2">Расходники ({carts.length})</div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-72 overflow-y-auto pr-1">
                       {carts.map(c => (
-                        <div key={c.id} className="p-3 border rounded-xl bg-white hover:bg-gray-50">
+                        <div data-testid="printer-consumable" key={c.id} className="p-2 text-xs border rounded-lg bg-white hover:bg-gray-50">
                           <div className="flex items-center justify-between gap-2">
-                            <button onClick={() => handlePrintCartridge(c.id)} className="font-mono font-bold text-blue-700 hover:underline flex items-center gap-1">
+                            <button onClick={() => handlePrintCartridge(c.id)} className="min-w-0 truncate font-mono text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1">
                               <ColorDot color={c.color} /> {getConsumableLabel(c, carts)}
                             </button>
-                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${STATUS_COLORS[c.status]}`}>{STATUS_LABELS[c.status]}</span>
+                            <span className={`ui-mini-pill shrink-0 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${STATUS_COLORS[c.status]}`}>{STATUS_LABELS[c.status]}</span>
                           </div>
-                          <div className="text-sm text-gray-700 mt-1">{c.model || 'Без модели'}</div>
-                          <div className="text-xs text-gray-400">{c.consumableType === 'drum' ? 'Драм' : 'Картридж'} · заправок: {c.refillCount}</div>
+                          <div className="mt-1 truncate text-[11px] text-gray-700" title={c.model || 'Без модели'}>{c.model || 'Без модели'}</div>
+                          <div className="mt-0.5 truncate text-[9px] leading-3 text-gray-400" title={`ID расходника: ${c.id}`}>
+                            ID: <span className="font-mono text-gray-500">{c.id}</span>
+                          </div>
+                          <button className="mt-1 text-[10px] text-blue-700 hover:underline" onClick={() => {
+                            setDetailsPrinter(null);
+                            setEditCartridgeId(c.id);
+                            setEditCartridgeModel(c.model);
+                            setEditCartridgeColor(c.color ?? '');
+                            setEditPin('');
+                            setCartPrintStatus(null);
+                          }}>Редактировать расходник</button>
+                          <div className="text-[10px] leading-4 text-gray-400">{c.consumableType === 'drum' ? 'Драм' : 'Картридж'} · заправок: {c.refillCount}</div>
                         </div>
                       ))}
                       {carts.length === 0 && <div className="text-gray-300 italic text-sm">Нет расходников</div>}
@@ -916,7 +737,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         setShowCustomType(false);
                         setCustomTypeInput('');
                       }}
-                      className={`flex-1 py-2 rounded-lg border text-sm font-bold transition-colors ${
+                      className={`ui-filter-button flex-1 py-2 rounded-lg border text-sm font-bold transition-colors ${
                         !showCustomType && newPrinter.printerType === t
                           ? t === 'mfu' ? 'bg-purple-100 border-purple-400 text-purple-700' : 'bg-blue-100 border-blue-400 text-blue-700'
                           : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'
@@ -981,6 +802,16 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 />
               </div>
 
+              <label className={`flex items-start gap-2 rounded-xl border px-3 py-2.5 ${editPrinter?.firmwareFlashed ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-500' : 'cursor-pointer border-purple-200 bg-purple-50/60 text-gray-800'}`}>
+                <input type="checkbox" checked={Boolean(editPrinter?.firmwareFlashed || newPrinter.firmwareFlashed)} disabled={Boolean(editPrinter?.firmwareFlashed)} onChange={event => setNewPrinter({ ...newPrinter, firmwareFlashed: event.target.checked })} className="mt-0.5 h-4 w-4 rounded accent-purple-600" />
+                <span><span className="block text-sm font-semibold">Принтер прошит (прошивка выполнена)</span>{editPrinter?.firmwareFlashed && <span className="mt-0.5 block text-[10px] text-gray-400">Отметка уже зафиксирована и защищена от случайного снятия.</span>}</span>
+              </label>
+
+              <label className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2.5 ${newPrinter.isDecommissioned ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50/60'}`}>
+                <span><span className="block text-sm font-semibold text-gray-700">Списан</span><span className="block text-[10px] text-gray-400">Устройство останется в базе и будет выделено в списке</span></span>
+                <input type="checkbox" checked={Boolean(newPrinter.isDecommissioned)} onChange={event => setNewPrinter({ ...newPrinter, isDecommissioned: event.target.checked, decommissionedAt: event.target.checked ? (newPrinter.decommissionedAt || new Date().toISOString()) : undefined })} className="h-4 w-4 accent-amber-600" />
+              </label>
+
               <div className="flex space-x-2 pt-2">
                 <button type="button" onClick={() => { setShowAddPrinter(false); setEditPrinter(null); }}
                   className="flex-1 py-2 border rounded-lg text-sm hover:bg-gray-50">Отмена</button>
@@ -1028,7 +859,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       key={v}
                       type="button"
                       onClick={() => setAddCart({ ...addCart, consumableType: v })}
-                      className={`flex-1 py-2 rounded-lg border text-xs font-bold transition-colors ${
+                      className={`ui-filter-button flex-1 py-2 rounded-lg border text-xs font-bold transition-colors ${
                         addCart.consumableType === v
                           ? 'bg-blue-100 border-blue-400 text-blue-700'
                           : 'bg-white border-gray-200 text-gray-500 hover:bg-gray-50'
@@ -1067,7 +898,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <button
                     type="button"
                     onClick={() => setAddCart({ ...addCart, color: undefined })}
-                    className={`px-2 py-1 rounded border text-xs ${!addCart.color ? 'bg-gray-800 text-white' : 'bg-white text-gray-500'}`}
+                    className={`ui-mini-pill px-2 py-1 rounded border text-xs ${!addCart.color ? 'bg-gray-800 text-white' : 'bg-white text-gray-500'}`}
                   >
                     —
                   </button>
@@ -1151,7 +982,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <button
                     type="button"
                     onClick={() => setEditCartridgeColor('')}
-                    className={`px-2 py-1 rounded border text-xs ${!editCartridgeColor ? 'bg-gray-800 text-white' : 'bg-white text-gray-500'}`}
+                    className={`ui-mini-pill px-2 py-1 rounded border text-xs ${!editCartridgeColor ? 'bg-gray-800 text-white' : 'bg-white text-gray-500'}`}
                   >
                     —
                   </button>

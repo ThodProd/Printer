@@ -1,3 +1,4 @@
+import { notify } from '../utils/dialogs';
 
 import React, { useState } from 'react';
 import { FileText, CheckCircle2, AlertCircle, Info } from 'lucide-react';
@@ -165,7 +166,7 @@ const ImportTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setFileData('');
     setPreview([]);
     setErrors([]);
-    alert(`Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`);
+    void notify(`Импортировано ${preview.length} принтеров. Создано расходников: ${createdCartridges}`);
   };
 
   return (

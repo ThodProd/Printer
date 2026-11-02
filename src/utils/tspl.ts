@@ -83,6 +83,13 @@ export interface LabelData {
   location?: string;
   description?: string;
   vendor?: string;
+  firmwareFlashed?: boolean;
+}
+
+export const LABEL_FIRMWARE_MARK = 'Прошит';
+
+function normalizeLegacyFirmwareToken(tspl: string): string {
+  return tspl.replace(/^(TEXT\s+[^,\r\n]+(?:,[^,\r\n]+){5},)"П"\s*$/gim, '$1"{fw}"');
 }
 
 /** Replace template variables with actual data */
@@ -111,6 +118,8 @@ export function resolveContent(
     .replace(/\{location\}/g, data.location ?? '')
     .replace(/\{description\}/g, data.description ?? '')
     .replace(/\{vendor\}/g, data.vendor ?? '')
+    .replace(/\{fw\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
+    .replace(/\{firmware\}/g, data.firmwareFlashed === true ? LABEL_FIRMWARE_MARK : '')
     .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
 }
 
@@ -122,7 +131,7 @@ export function buildTSPLLabel(
   options: { ignoreCustomTspl?: boolean } = {},
 ): string {
   if (settings.labelTsplTemplate && !options.ignoreCustomTspl) {
-    return resolveContent(settings.labelTsplTemplate, data).trimEnd();
+    return resolveContent(normalizeLegacyFirmwareToken(settings.labelTsplTemplate), data).trimEnd();
   }
 
   const effectiveSettings: AppSettings = {

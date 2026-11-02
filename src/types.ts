@@ -56,6 +56,11 @@ export interface Cartridge {
   refillCount: number;
   registrationDate: string;
   lastSubmittedBy?: string;
+  /** Optional link to the printer repair whose device travels with this consumable. */
+  linkedRepairId?: string;
+  /** Monotonic position of this consumable on its printer. */
+  consumableSlot?: number;
+  labelPrinted?: boolean;
 }
 
 export interface Printer {
@@ -68,8 +73,25 @@ export interface Printer {
   department: string;
   boss: string;
   cartridgeModels: string[];
+  /** Compatible drum units for this printer model. Older databases may omit it. */
+  drumModels?: string[];
   commissionDate: string;
   balanceCost: string;
+  /** Прошивка принтера выполнена. Старые рабочие базы уже содержат это поле. */
+  firmwareFlashed?: boolean;
+  /** Device remains in history but is no longer active. Added by database reconciliation. */
+  isDecommissioned?: boolean;
+  decommissionedAt?: string;
+  refillCount?: number;
+  repairCount?: number;
+  consumableCartridgeSeq?: number;
+  consumableDrumSeq?: number;
+}
+
+export interface PrinterModelMapping {
+  printerModel: string;
+  cartridgeModels: string[];
+  drumModels: string[];
 }
 
 export interface RepairEntry {
@@ -82,12 +104,21 @@ export interface RepairEntry {
   status: 'waiting' | 'in_repair' | 'repaired';
   comment?: string;
   technician?: string;
+  locationStatus?: 'waiting' | 'at_refill' | 'ready' | 'issued';
+}
+
+export interface RefillBatchItem {
+  kind: 'cartridge' | 'printer';
+  id: string;
+  printerInventoryNumber: string;
+  repairId?: string;
 }
 
 export interface RefillBatch {
   id: string;
   date: string;
   cartridgeIds: string[];
+  items?: RefillBatchItem[];
   status: 'sent' | 'received';
   company?: string;
   notes?: string;
@@ -96,14 +127,21 @@ export interface RefillBatch {
 export interface RefillLogEntry {
   id: string;
   date: string;
+  /** Added in 1.1.2. Older refill-only records may not contain these fields. */
+  category?: 'printer' | 'cartridge' | 'repair' | 'employee' | 'stock' | 'batch' | 'settings' | 'database';
+  entityId?: string;
   cartridgeId: string;
   cartridgeModel: string;
-  consumableType: ConsumableType;
+  consumableType?: ConsumableType | 'device';
+  deviceType?: string;
+  serviceType?: string;
+  is_technical?: boolean;
   printerInventoryNumber: string;
   printerModel: string;
   department?: string;
   employee?: string;
   action: string;
+  details?: string;
 }
 
 export interface EmployeeRecord {
@@ -155,8 +193,8 @@ export interface AppSettings {
   barcodeKey: 'id' | 'inv';
   /** Show technical/system log tabs in journal */
   showTechLogs: boolean;
-  /** Printers tab view mode */
-  printersViewMode: 'list' | 'cards';
+  /** Allow destructive corrections of already recorded warehouse events. */
+  enableEventEditing?: boolean;
   /** How to send label data to printer. raw = WinSpool RAW API, driver = Windows print command fallback. */
   labelPrintMode: 'raw' | 'driver';
 }
@@ -191,7 +229,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   labelRotation: 0,
   barcodeKey: 'id',
   showTechLogs: false,
-  printersViewMode: 'list',
+  enableEventEditing: false,
   labelPrintMode: 'driver',
 };
 
@@ -249,8 +287,10 @@ export interface NewCartridge {
 
 declare global {
   interface Window {
-    electronAPI?: {
-      isElectron: boolean;
+    desktopAPI?: {
+      isDesktop: boolean;
+      ready?: () => Promise<void>;
+      finishClose?: (success: boolean) => Promise<void>;
       getPrinters: () => Promise<string[]>;
       rawPrint: (printerName: string, data: string, mode?: 'raw' | 'driver') => Promise<{ success: boolean; error?: string }>;
       pingPrinter: (printerName: string) => Promise<{ ok: boolean; message: string }>;
@@ -259,7 +299,7 @@ declare global {
       openFolder: (path: string) => Promise<boolean>;
       installDriver: () => Promise<{ success: boolean; error?: string }>;
       loadDatabase: () => Promise<{ success: boolean; data: unknown | null; path: string; error?: string }>;
-      saveDatabase: (data: unknown) => Promise<{ success: boolean; path: string; error?: string }>;
+      saveDatabase: (data: unknown, backup?: unknown) => Promise<{ success: boolean; path: string; backupPath?: string; error?: string }>;
       getDataFolder: () => Promise<string>;
     };
   }

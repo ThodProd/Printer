@@ -8,3 +8,11 @@ release-*/
 .DS_Store
 Thumbs.db
 *.local
+
+Data/
+test-results/
+playwright-report/
+installer/redist/
+
+**/bin/
+**/obj/

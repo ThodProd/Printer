@@ -54,6 +54,8 @@ const VARIABLE_TAGS = [
   { tag: '{location}', label: 'Место хранения' },
   { tag: '{description}', label: 'Описание' },
   { tag: '{vendor}', label: 'Модель принтера для новых картриджей' },
+  { tag: '{fw}', label: 'Метка «Прошит» для принтера' },
+  { tag: '{firmware}', label: 'Метка «Прошит» для принтера' },
   { tag: '{date}', label: 'Дата' },
 ];
 
@@ -86,6 +88,8 @@ function resolveContent(tpl: string): string {
     .replace(/\{location\}/g, 'Склад')
     .replace(/\{description\}/g, 'Описание')
     .replace(/\{vendor\}/g, TEST_MODEL)
+    .replace(/\{fw\}/g, 'Прошит')
+    .replace(/\{firmware\}/g, 'Прошит')
     .replace(/\{date\}/g, new Date().toLocaleDateString('ru-RU'));
 }
 
@@ -644,7 +648,7 @@ const LabelEditorTab: React.FC<{ store: StoreType }> = ({ store }) => {
               className="w-full min-h-56 p-3 bg-gray-950 border border-gray-700 rounded-lg text-green-400 font-mono text-xs leading-relaxed outline-none focus:ring-2 focus:ring-blue-500 resize-y"
             />
             <p className="text-gray-500 text-[11px] font-sans">
-              Это единственный шаблон этикетки. Что сохранено здесь, то отправляется на печать. Для переменных используйте {`{id}`}, {`{inv}`}, {`{model}`}, {`{cartModel}`}, {`{date}`}.
+              Это единственный шаблон этикетки. Что сохранено здесь, то отправляется на печать. Для переменных используйте {`{id}`}, {`{inv}`}, {`{model}`}, {`{cartModel}`}, {`{fw}`}/{`{firmware}`}, {`{date}`}.
             </p>
           </div>
 

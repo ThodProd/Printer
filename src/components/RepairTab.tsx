@@ -1,3 +1,4 @@
+import { notify } from '../utils/dialogs';
 
 import React, { useEffect, useState, useMemo } from 'react';
 import {
@@ -32,17 +33,19 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [showAdd, setShowAdd] = useState(false);
   const [showFinish, setShowFinish] = useState<RepairEntry | null>(null);
   const [repairDescription, setRepairDescription] = useState('');
+  const [firmwareOnComplete, setFirmwareOnComplete] = useState(false);
   const [newRepair, setNewRepair] = useState<NewRepairForm>(EMPTY_FORM);
   const [searchQuery, setSearchQuery] = useState('');
   const [printerSearch, setPrinterSearch] = useState('');
 
   useEffect(() => {
     const onScan = (event: Event) => {
-      setSearchQuery((event as CustomEvent<string>).detail);
+      const code = (event as CustomEvent<string>).detail;
+      if (showAdd) setPrinterSearch(code); else setSearchQuery(code);
     };
     window.addEventListener('app-scanner-input', onScan as EventListener);
     return () => window.removeEventListener('app-scanner-input', onScan as EventListener);
-  }, []);
+  }, [showAdd]);
 
   const active = store.repairs.filter(r => r.status === 'in_repair' || r.status === 'waiting');
   const history = store.repairs.filter(r => r.status === 'repaired');
@@ -72,7 +75,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const handleAddRepair = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newRepair.printerInventoryNumber) {
-      alert('Выберите принтер');
+      void notify('Выберите принтер');
       return;
     }
     const repair: RepairEntry = {
@@ -98,8 +101,11 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       completionDate: new Date().toISOString(),
       repairDescription: repairDescription || undefined,
     });
+    const printer = store.printers.find(item => item.inventoryNumber === showFinish.printerInventoryNumber);
+    if (firmwareOnComplete && printer && !printer.firmwareFlashed) store.updatePrinter(printer.inventoryNumber, { firmwareFlashed: true });
     setShowFinish(null);
     setRepairDescription('');
+    setFirmwareOnComplete(false);
   };
 
   const statusTag = (status: RepairEntry['status']) => {
@@ -178,7 +184,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
               <div className="flex space-x-2">
                 <button
-                  onClick={() => { setShowFinish(repair); setRepairDescription(''); }}
+                  onClick={() => { setShowFinish(repair); setRepairDescription(''); setFirmwareOnComplete(false); }}
                   className="flex-1 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center justify-center space-x-2 text-sm font-bold"
                 >
                   <CheckCircle2 size={15} />
@@ -186,7 +192,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 </button>
                 <button
                   onClick={() => store.updateRepair(repair.id, { status: repair.status === 'waiting' ? 'in_repair' : 'waiting' })}
-                  className="px-3 py-2 border rounded-lg hover:bg-gray-50 text-xs text-gray-500"
+                  className="ui-table-action px-3 py-2 border rounded-lg hover:bg-gray-50 text-xs text-gray-500"
                 >
                   {repair.status === 'waiting' ? 'Взять в работу' : 'Пауза'}
                 </button>
@@ -204,7 +210,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
-            <input
+            <input data-scanner="true"
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
@@ -270,7 +276,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   <input
                     type="text"
                     placeholder="Введите инв. №, ID или модель..."
-                    value={printerSearch}
+                    data-scanner="true" value={printerSearch}
                     onChange={e => setPrinterSearch(e.target.value)}
                     className="w-full pl-9 p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
                   />
@@ -377,6 +383,10 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 <AlertTriangle size={16} />
                 <span>Дата завершения будет установлена автоматически.</span>
               </div>
+              {(() => {
+                const alreadyFlashed = store.printers.find(item => item.inventoryNumber === showFinish.printerInventoryNumber)?.firmwareFlashed;
+                return <label className={`flex items-start gap-2 rounded-lg border p-3 text-sm ${alreadyFlashed ? 'border-gray-200 bg-gray-50 text-gray-400' : 'cursor-pointer border-purple-200 bg-purple-50 text-gray-700'}`}><input type="checkbox" checked={alreadyFlashed ? false : firmwareOnComplete} disabled={Boolean(alreadyFlashed)} onChange={event => setFirmwareOnComplete(event.target.checked)} className="mt-0.5 h-4 w-4 accent-purple-600" /><span><span className="font-semibold">Выполнена прошивка принтера</span>{alreadyFlashed && <span className="mt-0.5 block text-[10px]">Принтер уже отмечен как прошитый</span>}</span></label>;
+              })()}
               <div className="flex space-x-2">
                 <button type="button" onClick={() => setShowFinish(null)}
                   className="flex-1 py-2.5 border rounded-lg text-sm hover:bg-gray-50">Отмена</button>

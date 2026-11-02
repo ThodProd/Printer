@@ -10,6 +10,9 @@ const __dirname = path.dirname(__filename);
 
 export default defineConfig({
   plugins: [react(), tailwindcss(), viteSingleFile()],
+  server: {
+    watch: { ignored: ['**/release/**', '**/Data/**', '**/native/**/bin/**', '**/native/**/obj/**', '**/test-results/**'] },
+  },
   base: "./",
   build: {
     outDir: "dist",

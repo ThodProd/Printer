@@ -1,3 +1,5 @@
+import Pagination, { usePage } from './Pagination';
+import { groupBy } from '../utils/indexes';
 
 import React, { useEffect, useMemo, useState } from 'react';
 import {
@@ -62,20 +64,20 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       (c.description ?? '').toLowerCase().includes(q),
   ), [store.newCartridges, q]);
 
-  const getPrinterCartridges = (invNum: string) =>
-    store.cartridges.filter((c: Cartridge) => c.printerInventoryNumber === invNum);
-
-  const getLatestRepair = (invNum: string) =>
-    store.repairs
-      .filter(r => r.printerInventoryNumber === invNum)
-      .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
+  const printerPage = usePage(filteredPrinters);
+  const cartridgePage = usePage(filteredCartridges);
+  const newPage = usePage(filteredNewCartridges);
+  const cartridgesByPrinter = useMemo(() => groupBy(store.cartridges, c => c.printerInventoryNumber), [store.cartridges]);
+  const repairsByPrinter = useMemo(() => groupBy(store.repairs, r => r.printerInventoryNumber), [store.repairs]);
+  const getPrinterCartridges = (invNum: string) => cartridgesByPrinter.get(invNum) ?? [];
+  const getLatestRepair = (invNum: string) => [...(repairsByPrinter.get(invNum) ?? [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
 
   const handlePrintCartridge = async (cartridge: Cartridge) => {
     if (!store.settings.labelPrinterName) {
       setPrintStatus({ text: 'Принтер этикеток не выбран (Настройки)', ok: false });
       return;
     }
-    if (!window.electronAPI) {
+    if (!window.desktopAPI) {
       setPrintStatus({ text: 'Только в desktop-версии', ok: false });
       return;
     }
@@ -95,7 +97,12 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       consumableType: cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
       status: STATUS_LABELS[cartridge.status],
     });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    store.recordAction({
+      category: 'cartridge', entityId: cartridge.id, cartridgeId: cartridge.id, cartridgeModel: cartridge.model,
+      consumableType: cartridge.consumableType, printerInventoryNumber: cartridge.printerInventoryNumber,
+      action: res.success ? 'Напечатана этикетка расходника' : 'Ошибка печати этикетки расходника', details: res.error,
+    });
     setPrintStatus(res.success
       ? { text: `Этикетка ${cartridge.id} отправлена`, ok: true }
       : { text: res.error ?? 'Ошибка', ok: false }
@@ -108,7 +115,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       setPrintStatus({ text: 'Принтер этикеток не выбран (Настройки)', ok: false });
       return;
     }
-    if (!window.electronAPI) {
+    if (!window.desktopAPI) {
       setPrintStatus({ text: 'Только в desktop-версии', ok: false });
       return;
     }
@@ -124,8 +131,14 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       printerType: printer.printerType,
       commissionDate: printer.commissionDate,
       balanceCost: printer.balanceCost,
+      firmwareFlashed: Boolean(printer.firmwareFlashed),
     });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    store.recordAction({
+      category: 'printer', entityId: printer.programId ?? printer.inventoryNumber,
+      printerInventoryNumber: printer.inventoryNumber, printerModel: printer.model,
+      action: res.success ? 'Напечатана этикетка принтера' : 'Ошибка печати этикетки принтера', details: res.error,
+    });
     setPrintStatus(res.success
       ? { text: `Этикетка принтера ${printer.inventoryNumber} отправлена`, ok: true }
       : { text: res.error ?? 'Ошибка', ok: false }
@@ -138,7 +151,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       {/* Search bar */}
       <div className="relative">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
-        <input
+        <input data-scanner="true"
           type="text"
           value={query}
           onChange={e => setQuery(e.target.value)}
@@ -177,7 +190,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <span>Принтеры ({filteredPrinters.length})</span>
             </div>
             <div className="divide-y max-h-[380px] overflow-auto">
-              {filteredPrinters.map(p => {
+              {printerPage.visible.map(p => {
                 const cartCount = getPrinterCartridges(p.inventoryNumber).length;
                 return (
                   <button
@@ -198,7 +211,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                             <span className="font-mono">{p.programId}</span>
                           </div>
                         )}
-                        <div className="text-sm text-gray-600">{p.model}</div>
+                        <div className="flex items-center gap-1.5 text-sm text-gray-600">{p.model}{p.firmwareFlashed && <span className="inline-block h-1.5 w-1.5 rounded-full bg-red-500 ring-2 ring-red-200" title="Прошит" aria-label="Прошит" />}</div>
                         <div className="text-xs text-gray-400 mt-0.5">{p.department}{p.boss ? ` — ${p.boss}` : ''}</div>
                       </div>
                       <div className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full shrink-0 ml-2">
@@ -208,6 +221,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </button>
                 );
               })}
+              <Pagination {...printerPage} />
               {filteredPrinters.length === 0 && (
                 <div className="p-6 text-center text-gray-400 italic">Ничего не найдено</div>
               )}
@@ -221,7 +235,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <span>Картриджи ({filteredCartridges.length})</span>
             </div>
             <div className="divide-y max-h-[380px] overflow-auto">
-              {filteredCartridges.map(c => (
+              {cartridgePage.visible.map(c => (
                 <button
                   key={c.id}
                   onClick={() => { setSelectedCartridge(c); setSelectedPrinter(null); }}
@@ -241,6 +255,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </div>
                 </button>
               ))}
+              <Pagination {...cartridgePage} />
               {filteredCartridges.length === 0 && (
                 <div className="p-6 text-center text-gray-400 italic">Ничего не найдено</div>
               )}
@@ -254,7 +269,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <span>Новые картриджи ({filteredNewCartridges.length})</span>
             </div>
             <div className="divide-y max-h-[280px] overflow-auto">
-              {filteredNewCartridges.map(c => (
+              {newPage.visible.map(c => (
                 <div key={c.id} className="p-4 hover:bg-blue-50 transition-colors">
                   <div className="flex justify-between items-start">
                     <div>
@@ -271,6 +286,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   </div>
                 </div>
               ))}
+              <Pagination {...newPage} />
               {filteredNewCartridges.length === 0 && (
                 <div className="p-6 text-center text-gray-400 italic">Ничего не найдено</div>
               )}
@@ -292,7 +308,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         <span className="font-mono">ID: {selectedPrinter.programId}</span>
                       </div>
                     )}
-                    <p className="opacity-80 text-sm mt-0.5">{selectedPrinter.model}</p>
+                    <p className="flex items-center gap-1.5 opacity-80 text-sm mt-0.5">{selectedPrinter.model}{selectedPrinter.firmwareFlashed && <span className="inline-block h-2 w-2 rounded-full bg-red-400" title="Прошит" aria-label="Прошит" />}</p>
                   </div>
                   <PrinterIcon size={28} className="opacity-40" />
                 </div>

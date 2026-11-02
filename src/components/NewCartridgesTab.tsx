@@ -1,3 +1,4 @@
+import { ask } from '../utils/dialogs';
 
 import React, { useEffect, useState, useMemo } from 'react';
 import {
@@ -22,6 +23,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [editItem, setEditItem] = useState<NewCartridge | null>(null);
   const [form, setForm] = useState<Omit<NewCartridge, 'id' | 'registrationDate'>>(EMPTY);
   const [search, setSearch] = useState('');
+  const [locationFilter, setLocationFilter] = useState('all');
   const [printStatus, setPrintStatus] = useState<{ id: string; text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
@@ -61,16 +63,18 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const filteredItems = useMemo(() => {
     const q = search.toLowerCase();
-    if (!q) return store.newCartridges;
     return store.newCartridges.filter(
-      c =>
-        c.id.toLowerCase().includes(q) ||
+      c => {
+        const matchesLocation = locationFilter === 'all' || (c.location ?? '').toLocaleLowerCase('ru') === locationFilter.toLocaleLowerCase('ru');
+        const matchesSearch = !q || c.id.toLowerCase().includes(q) ||
         c.model.toLowerCase().includes(q) ||
         (c.vendor ?? '').toLowerCase().includes(q) ||
         (c.location ?? '').toLowerCase().includes(q) ||
-        (c.description ?? '').toLowerCase().includes(q),
+        (c.description ?? '').toLowerCase().includes(q);
+        return matchesLocation && matchesSearch;
+      },
     );
-  }, [store.newCartridges, search]);
+  }, [store.newCartridges, search, locationFilter]);
 
   const openAdd = () => {
     setEditItem(null);
@@ -116,9 +120,9 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setShowAdd(false);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!editItem) return;
-    if (confirm('Удалить этот картридж со склада?')) {
+    if (await ask('Удалить этот картридж со склада?')) {
       store.removeNewCartridge(editItem.id);
       setShowAdd(false);
     }
@@ -129,7 +133,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       setPrintStatus({ id: item.id, text: 'Принтер не выбран (Настройки)', ok: false });
       return;
     }
-    if (!window.electronAPI) {
+    if (!window.desktopAPI) {
       setPrintStatus({ id: item.id, text: 'Только в desktop-версии', ok: false });
       return;
     }
@@ -146,7 +150,11 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
       status: 'Новый на складе',
       consumableType: 'Новый картридж',
     });
-    const res = await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    store.recordAction({
+      category: 'stock', entityId: item.id, cartridgeId: item.id, cartridgeModel: item.model,
+      action: res.success ? 'Напечатана этикетка нового картриджа' : 'Ошибка печати этикетки нового картриджа', details: res.error,
+    });
     setPrintStatus({
       id: item.id,
       text: res.success ? 'Этикетка отправлена!' : (res.error ?? 'Ошибка'),
@@ -204,21 +212,26 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
         </div>
       </div>
 
-      {/* Search */}
-      <div className="relative max-w-sm">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
-        <input
-          type="text"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          placeholder="Поиск по ID, модели, поставщику..."
-          className="w-full pl-9 pr-3 py-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none"
-        />
-        {search && (
-          <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400">
-            <X size={14} />
-          </button>
-        )}
+      {/* Search and quick location filters */}
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative w-72">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={14} />
+          <input data-scanner="true"
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Поиск по ID, модели, поставщику..."
+            className="w-full pl-9 pr-8 py-2 border rounded-lg text-xs focus:ring-2 focus:ring-blue-500 outline-none"
+          />
+          {search && <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400"><X size={14} /></button>}
+        </div>
+        <div className="flex max-w-full flex-wrap overflow-hidden rounded-lg border bg-white text-xs font-semibold">
+          {['all', ...locationSuggestions].map(location => {
+            const count = location === 'all' ? store.newCartridges.length : store.newCartridges.filter(item => (item.location ?? '').toLocaleLowerCase('ru') === location.toLocaleLowerCase('ru')).length;
+            const label = location === 'all' ? 'Все' : location;
+            return <button key={location} aria-label={`${label} (${count})`} onClick={() => setLocationFilter(location)} className={`ui-filter-button whitespace-nowrap border-0 px-3 py-2 ${locationFilter === location ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`}>{label}<span className="ml-1 opacity-60">{count}</span></button>;
+          })}
+        </div>
       </div>
 
       {/* Print status */}
@@ -301,14 +314,14 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       <div className="flex justify-end space-x-2">
                         <button
                           onClick={() => handlePrint(item)}
-                          className="px-2 py-1 text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100 flex items-center space-x-1"
+                          className="ui-table-action px-2 py-1 text-xs font-bold bg-blue-50 text-blue-700 border border-blue-200 rounded hover:bg-blue-100 flex items-center space-x-1"
                         >
                           <BarcodeIcon size={12} />
                           <span>Штрих-код</span>
                         </button>
                         <button
                           onClick={() => openEdit(item)}
-                          className="px-2 py-1 border rounded text-xs text-gray-500 hover:bg-gray-50"
+                          className="ui-table-action px-2 py-1 border rounded text-xs text-gray-500 hover:bg-gray-50"
                         >
                           <Edit2 size={12} />
                         </button>

@@ -1,5 +1,6 @@
+import { ask } from '../utils/dialogs';
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Settings, Printer as PrinterIcon, Scan, Sliders, RefreshCw,
   Barcode as BarcodeIcon, CheckCircle2, AlertCircle, Volume2, VolumeX,
@@ -17,8 +18,8 @@ async function sendTSPL(
   mode?: 'raw' | 'driver',
 ): Promise<{ success: boolean; error?: string }> {
   if (!printerName) return { success: false, error: 'Принтер не выбран. Укажите принтер в настройках.' };
-  if (window.electronAPI) return window.electronAPI.rawPrint(printerName, tspl, mode);
-  return { success: false, error: 'Отправка доступна только в desktop-версии (Electron).' };
+  if (window.desktopAPI) return window.desktopAPI.rawPrint(printerName, tspl, mode);
+  return { success: false, error: 'Отправка доступна только в desktop-версии Windows.' };
 }
 
 const SUB_TABS = [
@@ -68,15 +69,20 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const [scanTestInput, setScanTestInput] = useState('');
   const [lastScan, setLastScan] = useState('');
+  useEffect(() => {
+    const onScan = (event: Event) => setScanTestInput((event as CustomEvent<string>).detail);
+    window.addEventListener('app-scanner-input', onScan);
+    return () => window.removeEventListener('app-scanner-input', onScan);
+  }, []);
   const scanInputRef = useRef<HTMLInputElement>(null);
 
-  const isElectron = !!window.electronAPI;
+  const isDesktop = !!window.desktopAPI;
 
   const refreshPrinters = async () => {
-    if (!isElectron) return;
+    if (!isDesktop) return;
     setLoadingPrinters(true);
     try {
-      const list = await window.electronAPI!.getPrinters();
+      const list = await window.desktopAPI!.getPrinters();
       setAvailablePrinters(list);
     } finally {
       setLoadingPrinters(false);
@@ -88,15 +94,20 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       setPingStatus({ text: 'Введите имя принтера', ok: false });
       return;
     }
-    if (!window.electronAPI?.pingPrinter) {
+    if (!window.desktopAPI?.pingPrinter) {
       setPingStatus({ text: 'Ping доступен только в desktop-версии (.exe)', ok: false });
       return;
     }
     setPinging(true);
     setPingStatus(null);
     try {
-      const res = await window.electronAPI.pingPrinter(cfg.labelPrinterName);
+      const res = await window.desktopAPI.pingPrinter(cfg.labelPrinterName);
       setPingStatus({ text: res.message, ok: res.ok });
+      store.recordAction({
+        category: 'settings', entityId: cfg.labelPrinterName,
+        action: res.ok ? 'Проверена доступность принтера этикеток' : 'Принтер этикеток недоступен',
+        details: res.message,
+      });
     } finally {
       setPinging(false);
     }
@@ -117,7 +128,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       autoPrintOnRegister: cfg.autoPrintOnRegister,
       showPreviewBeforePrint: cfg.showPreviewBeforePrint,
       soundNotification: cfg.soundNotification,
-      showTechLogs: cfg.showTechLogs,
+      enableEventEditing: cfg.enableEventEditing,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -130,6 +141,11 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const doSend = async (tspl: string) => {
     setPrintStatus(null);
     const res = await sendTSPL(cfg.labelPrinterName, tspl, cfg.labelPrintMode);
+    store.recordAction({
+      category: 'settings', entityId: cfg.labelPrinterName || 'label-printer',
+      action: res.success ? 'Отправлена сервисная команда принтеру' : 'Ошибка сервисной команды принтеру',
+      details: res.error || tspl.split(/\r?\n/, 1)[0],
+    });
     setPrintStatus(
       res.success
         ? { text: 'Отправлено на принтер!', ok: true }
@@ -150,6 +166,11 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
     setDriverStatus(null);
     try {
       const res = await sendTSPL(cfg.labelPrinterName, buildMemoryResetTSPL(), cfg.labelPrintMode);
+      store.recordAction({
+        category: 'settings', entityId: cfg.labelPrinterName,
+        action: res.success ? 'Сброшена память принтера этикеток' : 'Ошибка сброса памяти принтера',
+        details: res.error,
+      });
       setDriverStatus(
         res.success
           ? { text: 'Память принтера сброшена (INITIALPRINTER)', ok: true }
@@ -161,9 +182,10 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
   };
 
   const handleOpenDataFolder = async () => {
-    if (!window.electronAPI?.getDataFolder || !window.electronAPI?.openFolder) return;
-    const folder = await window.electronAPI.getDataFolder();
-    await window.electronAPI.openFolder(folder);
+    if (!window.desktopAPI?.getDataFolder || !window.desktopAPI?.openFolder) return;
+    const folder = await window.desktopAPI.getDataFolder();
+    const opened = await window.desktopAPI.openFolder(folder);
+    store.recordAction({ category: 'database', entityId: 'Data', action: opened ? 'Открыта папка данных' : 'Не удалось открыть папку данных', details: folder });
   };
 
   return (
@@ -171,7 +193,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       <div className="flex items-center space-x-3">
         <Settings size={22} className="text-blue-600" />
         <h2 className="text-xl font-bold text-gray-800">Настройки</h2>
-        {isElectron && (
+        {isDesktop && (
           <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full font-bold">Desktop</span>
         )}
       </div>
@@ -198,7 +220,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <span>Принтер этикеток (TSC)</span>
             </h3>
 
-            {isElectron ? (
+            {isDesktop ? (
               <div className="space-y-2">
                 <label className="text-xs text-gray-500 uppercase font-bold">Выбрать из системы</label>
                 <div className="flex space-x-2">
@@ -234,7 +256,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   placeholder="TSC TTP-225 (RAW)"
                   className="flex-1 p-2 border rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
                 />
-                {isElectron && (
+                {isDesktop && (
                   <button
                     onClick={handlePingPrinter}
                     disabled={pinging}
@@ -301,7 +323,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               )}
               <button
                 onClick={handleResetPrinterMemory}
-                disabled={resettingMemory || !isElectron || !cfg.labelPrinterName}
+                disabled={resettingMemory || !isDesktop || !cfg.labelPrinterName}
                 className="flex items-center space-x-2 px-4 py-2 bg-orange-600 text-white rounded-lg text-sm font-bold hover:bg-orange-700 disabled:opacity-50"
               >
                 <Trash2 size={14} className={resettingMemory ? 'animate-pulse' : ''} />
@@ -423,7 +445,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               <Scan size={16} className="text-blue-600" />
               <span>Тест сканирования</span>
             </h3>
-            <input
+            <input data-scanner="true"
               ref={scanInputRef}
               type="text"
               value={scanTestInput}
@@ -473,7 +495,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               { key: 'autoPrintOnRegister', label: 'Авто-печать при регистрации расходника', hint: 'Этикетка печатается сразу после создания' },
               { key: 'showPreviewBeforePrint', label: 'Показывать предпросмотр перед печатью', hint: 'Открывает окно подтверждения с превью' },
               { key: 'soundNotification', label: 'Звук после успешного сканирования', hint: 'Короткий сигнал при обработке штрих-кода' },
-              { key: 'showTechLogs', label: 'Технические записи в журнале', hint: 'Показывать все системные события в журнале заправок' },
+              { key: 'enableEventEditing', label: 'Разрешить редактирование и отмену складских событий', hint: 'Показывает отмену партий, изменение истории и другие корректирующие действия' },
             ].map(({ key, label, hint }) => {
               const val = (cfg as unknown as Record<string, boolean>)[key];
               return (
@@ -521,21 +543,15 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <div className="flex flex-wrap gap-2">
               <button
                 onClick={handleOpenDataFolder}
-                disabled={!isElectron}
+                disabled={!isDesktop}
                 className="px-4 py-2 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg text-sm hover:bg-blue-100 font-semibold disabled:opacity-50"
               >
                 Открыть папку Data
               </button>
               <button
-                onClick={() => {
-                  if (confirm('Очистить ВСЕ данные? Это необратимо!')) {
-                    store.setPrinters([]);
-                    store.setCartridges([]);
-                    store.setRepairs([]);
-                    store.setBatches([]);
-                    store.setEmployees([]);
-                    store.setRefillLog([]);
-                    store.setNewCartridges([]);
+                onClick={async () => {
+                  if (await ask('Очистить ВСЕ данные? Это необратимо!')) {
+                    store.clearAllData();
                   }
                 }}
                 className="px-4 py-2 bg-red-50 text-red-600 border border-red-200 rounded-lg text-sm hover:bg-red-100 font-semibold"
@@ -553,7 +569,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <h3 className="font-bold text-blue-800 text-sm">О программе</h3>
             <div className="text-sm text-blue-700 space-y-1">
               <div><strong>Cartridge Control</strong> — система учёта картриджей</div>
-              <div>Версия: <strong>1</strong></div>
+              <div>Версия: <strong>1.1.17</strong></div>
               <div>Создатель: <strong>Спиркин В.А.</strong></div>
             </div>
           </div>

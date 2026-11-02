@@ -116,21 +116,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
           }
         }
 
-        // Log refill action
-        const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-        store.addRefillLog({
-          id: Math.random().toString(36).substr(2, 9),
-          date: new Date().toISOString(),
-          cartridgeId: cartridge.id,
-          cartridgeModel: cartridge.model,
-          consumableType: cartridge.consumableType ?? 'cartridge',
-          printerInventoryNumber: cartridge.printerInventoryNumber,
-          printerModel: printer?.model ?? '',
-          department: printer?.department ?? '',
-          employee,
-          action: 'Принят на склад (сдан на заправку)',
-        });
-
         setMessage({ text: `✓ Принят на склад: ${cartridge.id}`, type: 'success' });
         addOp(`Принят: ${cartridge.id}${employee ? ` (${employee})` : ''}`, true);
       }
@@ -140,25 +125,14 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         addOp(`Не на заправке: ${cartridge.id}`, false);
       } else {
         store.updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Принят с заправки');
-        const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
-        store.addRefillLog({
-          id: Math.random().toString(36).substr(2, 9),
-          date: new Date().toISOString(),
-          cartridgeId: cartridge.id,
-          cartridgeModel: cartridge.model,
-          consumableType: cartridge.consumableType ?? 'cartridge',
-          printerInventoryNumber: cartridge.printerInventoryNumber,
-          printerModel: printer?.model ?? '',
-          department: printer?.department ?? '',
-          action: 'Принят с заправки',
-        });
+        store.applyWarehouseReceiveForCartridgeFromDashboard(cartridge.id);
         setMessage({ text: `✓ Принят с заправки: ${cartridge.id}`, type: 'success' });
         addOp(`Получен с заправки: ${cartridge.id}`, true);
       }
     } else if (pendingAction === 'return') {
       if (cartridge.status === 'received_from_refill' || cartridge.status === 'ready') {
         store.updateCartridgeStatus(cartridge.id, 'on_hand', 'Выдан пользователю', employee);
-        const printer = store.printers.find(p => p.inventoryNumber === cartridge.printerInventoryNumber);
+        store.applyWarehouseIssueSnapshotFromDashboard([cartridge.id], employee ?? 'Сотрудник');
         if (employee) {
           const existingEmployee = store.employees.find(
             e => e.name === employee && e.printerInventoryNumber === cartridge.printerInventoryNumber,
@@ -173,18 +147,6 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
             });
           }
         }
-        store.addRefillLog({
-          id: Math.random().toString(36).substr(2, 9),
-          date: new Date().toISOString(),
-          cartridgeId: cartridge.id,
-          cartridgeModel: cartridge.model,
-          consumableType: cartridge.consumableType ?? 'cartridge',
-          printerInventoryNumber: cartridge.printerInventoryNumber,
-          printerModel: printer?.model ?? '',
-          department: printer?.department ?? '',
-          employee,
-          action: 'Выдан пользователю',
-        });
         setMessage({ text: `✓ Выдан: ${cartridge.id}`, type: 'success' });
         addOp(`Выдан: ${cartridge.id}${employee ? ` (${employee})` : ''}`, true);
       } else if (cartridge.status === 'on_hand') {
@@ -241,7 +203,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
     store.addCartridge(cartridge);
 
     // Auto print if enabled
-    if (store.settings.autoPrintOnRegister && store.settings.labelPrinterName && window.electronAPI) {
+    if (store.settings.autoPrintOnRegister && store.settings.labelPrinterName && window.desktopAPI) {
       const tspl = buildTSPLLabel(getTemplate(store.settings), store.settings, {
         id,
         inv: newForm.printerInventoryNumber,
@@ -256,7 +218,13 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
         consumableType: 'Картридж',
         status: STATUS_LABELS.waiting,
       });
-      window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      void window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode).then(result => {
+        store.recordAction({
+          category: 'cartridge', entityId: id, cartridgeId: id, cartridgeModel: newForm.model,
+          printerInventoryNumber: newForm.printerInventoryNumber,
+          action: result.success ? 'Автоматически напечатана этикетка расходника' : 'Ошибка автоматической печати этикетки', details: result.error,
+        });
+      });
     }
 
     setMessage({ text: `✓ Зарегистрирован: ${id}. Напечатайте этикетку!`, type: 'success' });
@@ -319,7 +287,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
       <div className="bg-white p-6 rounded-xl shadow-sm border">
         <form onSubmit={handleScan} className="flex flex-col items-center space-y-3">
           <label className="text-sm font-medium text-gray-600">{mc.placeholder}</label>
-          <input
+          <input data-scanner="true"
             ref={inputRef}
             type="text"
             value={barcode}
@@ -501,7 +469,7 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
               {infoCard.cartridge && (
                 <button
                   onClick={async () => {
-                    if (!store.settings.labelPrinterName || !window.electronAPI) return;
+                    if (!store.settings.labelPrinterName || !window.desktopAPI) return;
                     const printer = store.printers.find(p => p.inventoryNumber === infoCard.cartridge.printerInventoryNumber);
                     const tspl = buildTSPLLabel(getTemplate(store.settings), store.settings, {
                       id: infoCard.cartridge.id,
@@ -517,9 +485,15 @@ const Dashboard: React.FC<{ store: StoreType; onNavigate?: (tab: string) => void
                       consumableType: infoCard.cartridge.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
                       status: STATUS_LABELS[infoCard.cartridge.status],
                     });
-                    await window.electronAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+                    const result = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+                    store.recordAction({
+                      category: 'cartridge', entityId: infoCard.cartridge.id,
+                      cartridgeId: infoCard.cartridge.id, cartridgeModel: infoCard.cartridge.model,
+                      printerInventoryNumber: infoCard.cartridge.printerInventoryNumber,
+                      action: result.success ? 'Напечатана этикетка расходника' : 'Ошибка печати этикетки расходника', details: result.error,
+                    });
                   }}
-                  disabled={!store.settings.labelPrinterName || !window.electronAPI}
+                  disabled={!store.settings.labelPrinterName || !window.desktopAPI}
                   className="w-full py-2 border border-blue-200 text-blue-600 rounded-xl text-xs font-semibold hover:bg-blue-50 flex items-center justify-center space-x-2 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <BarcodeIcon size={13} />
