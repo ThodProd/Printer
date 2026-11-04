@@ -509,124 +509,12 @@ const WarehouseInventoryPanel: React.FC<WarehouseInventoryPanelProps> = ({
   };
 
   const executeReceivePrinter = (batchId: string, itemId: string, solution: string) => {
-    const batchSnap = batches.find(b => b.id === batchId);
-    const line = batchSnap?.items.find(i => i.id === itemId);
+    const batch = batches.find(candidate => candidate.id === batchId);
+    const line = batch?.items.find(item => item.id === itemId);
     if (!line || line.type !== 'Устройство' || !line.repairId) return;
-
-    const repair = store.repairs.find(r => r.id === line.repairId);
-    const printer = store.printers.find(p => p.inventoryNumber === line.printerInventoryNumber);
-    if (repair) {
-      store.updateRepair(repair.id, {
-        status: 'repaired',
-        completionDate: new Date().toISOString(),
-        repairDescription: solution.trim() || 'Принят с заправки',
-        locationStatus: 'ready',
-      });
-      store.cartridges
-        .filter(c => c.linkedRepairId === repair.id && c.status === 'at_refill')
-        .forEach(c => {
-          store.updateCartridgeStatus(
-            c.id,
-            'received_from_refill',
-            `Получен с заправки вместе с принтером. Партия ${batchId}`,
-          );
-        });
-      if (printer) {
-        store.updatePrinter(printer.inventoryNumber, { refillCount: (printer.refillCount ?? 0) + 1 });
-      }
-      store.addRefillLog({
-        id: Math.random().toString(36).substring(2, 11),
-        date: new Date().toISOString(),
-        cartridgeId: printer?.programId ?? line.printerInventoryNumber,
-        cartridgeModel: printer?.model ?? 'Устройство',
-        consumableType: 'device',
-        deviceType: printer?.printerType ?? 'Устройство',
-        serviceType: 'Ремонт',
-        printerInventoryNumber: line.printerInventoryNumber,
-        printerModel: printer?.model ?? '',
-        department: printer?.department ?? '',
-        employee: printer?.boss,
-        action: `Принтер получен с ремонта. Решение: ${solution}`,
-        is_technical: false,
-      });
-    }
-
-    const childSnapshotIds = batchSnap
-      ? batchSnap.items.filter(i => i.parentDeviceId === itemId && i.status === 'at_refill').map(i => i.id)
-      : [];
-
-    patchShipmentBatches(prev =>
-      prev.map(b => {
-        if (b.id !== batchId) return b;
-        const updated = b.items.map(item => {
-          if (item.status !== 'at_refill') return item;
-          if (item.id === itemId) {
-            return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-          }
-          if (item.parentDeviceId === itemId) {
-            return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-          }
-          return item;
-        });
-        const hasAtRefill = updated.some(i => i.status === 'at_refill');
-        return {
-          ...b,
-          status: hasAtRefill ? b.status : ('received' as const),
-          dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
-          items: updated,
-        };
-      }),
-    );
-
-    updateMergedItems(prev =>
-      prev.map(i => {
-        if (i.status !== 'at_refill') return i;
-        if (i.id === itemId || childSnapshotIds.includes(i.id)) {
-          return { ...i, status: 'ready', refillCount: i.refillCount + 1 };
-        }
-        return i;
-      }),
-    );
-
-    if (batchSnap) {
-      const simulatedItems = batchSnap.items.map(item => {
-        if (item.status !== 'at_refill') return item;
-        if (item.id === itemId) {
-          return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-        }
-        if (item.parentDeviceId === itemId) {
-          return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-        }
-        return item;
-      });
-      const hasAtRefill = simulatedItems.some(i => i.status === 'at_refill');
-      store.setWarehouseLedger(prev => {
-        return {
-          ...prev,
-          items: prev.items.map(item => {
-            if (item.id === itemId || childSnapshotIds.includes(item.id)) {
-              return { ...item, status: 'ready' as const, refillCount: item.refillCount + 1 };
-            }
-            return item;
-          }),
-          shipmentBatches: prev.shipmentBatches.map(b => {
-            if (b.id !== batchId) return b;
-            return {
-              ...b,
-              status: hasAtRefill ? b.status : ('received' as const),
-              dateReceived: hasAtRefill ? b.dateReceived : new Date().toISOString(),
-              items: simulatedItems,
-            };
-          }),
-        };
-      });
-
-      const hasAtRefillLegacy = simulatedItems.some(i => i.status === 'at_refill');
-      store.setBatches(pb =>
-        pb.map(b => (b.id === batchId ? { ...b, status: hasAtRefillLegacy ? 'sent' : 'received' } : b)),
-      );
-    }
-
+    const repair = store.repairs.find(candidate => candidate.id === line.repairId);
+    if (!repair) return;
+    store.completeRepairWorkflow(repair.id, solution);
     addLog('Получен с ремонта/заправки', `Устройство ${itemId} принято с ремонта. Решение: ${solution}`);
   };
 

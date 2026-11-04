@@ -13,7 +13,15 @@ const RANGE_LABELS: Record<ActivityRange, string> = { weeks: 'Недели', mon
 
 function ActivityChart({ entries }: { entries: RefillLogEntry[] }) {
   const [range, setRange] = useState<ActivityRange>('months');
-  const points = useMemo(() => buildActivitySeries(entries, range), [entries, range]);
+  const [periodOffset, setPeriodOffset] = useState(0);
+  const anchor = useMemo(() => {
+    const base = latestJournalDate(entries);
+    if (range === 'weeks') base.setDate(base.getDate() + periodOffset * 7);
+    else if (range === 'months') base.setMonth(base.getMonth() + periodOffset, 1);
+    else base.setFullYear(base.getFullYear() + periodOffset, 0, 1);
+    return base;
+  }, [entries, range, periodOffset]);
+  const points = useMemo(() => buildActivitySeries(entries, range, anchor), [entries, range, anchor]);
   const width = 760;
   const height = 245;
   const left = 42;
@@ -28,24 +36,39 @@ function ActivityChart({ entries }: { entries: RefillLogEntry[] }) {
   const issueLine = points.map((point, index) => `${xFor(index)},${yFor(point.issues)}`).join(' ');
   const repairLine = points.map((point, index) => `${xFor(index)},${yFor(point.repairs)}`).join(' ');
   const refillArea = points.length ? `${left},${top + plotHeight} ${refillLine} ${xFor(points.length - 1)},${top + plotHeight}` : '';
-  const anchor = latestJournalDate(entries);
+  const weekStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate());
+  weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
   const periodText = range === 'weeks'
-    ? `По дням недели · ${anchor.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}`
+    ? `${weekStart.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short' })} — ${weekEnd.toLocaleDateString('ru-RU', { day: '2-digit', month: 'short', year: 'numeric' })}`
     : range === 'months'
-      ? `Каждый день · ${anchor.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })}`
-      : `По месяцам · ${anchor.getFullYear()} год`;
+      ? anchor.toLocaleDateString('ru-RU', { month: 'long', year: 'numeric' })
+      : `${anchor.getFullYear()} год`;
+  const periodHint = range === 'weeks' ? 'События по дням выбранной недели' : range === 'months' ? 'События по дням выбранного месяца' : 'События по месяцам выбранного года';
+  const previousLabel = range === 'weeks' ? 'Предыдущая неделя' : range === 'months' ? 'Предыдущий месяц' : 'Предыдущий год';
+  const nextLabel = range === 'weeks' ? 'Следующая неделя' : range === 'months' ? 'Следующий месяц' : 'Следующий год';
+  const selectRange = (value: ActivityRange) => { setRange(value); setPeriodOffset(0); };
 
   return (
-    <section className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
+    <section data-testid="activity-chart" className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-2">
       <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
         <div>
           <div className="flex items-center gap-2 font-bold text-slate-800"><Activity size={17} className="text-blue-600" />Динамика обслуживания</div>
-          <p className="mt-0.5 text-[11px] text-slate-400">{periodText}</p>
+          <p className="mt-0.5 text-[11px] text-slate-400">{periodHint}</p>
         </div>
-        <div className="flex rounded-lg bg-slate-100 p-1 text-[11px] font-semibold">
-          {(Object.keys(RANGE_LABELS) as ActivityRange[]).map(value => (
-            <button key={value} onClick={() => setRange(value)} className={`rounded-md px-2.5 py-1 transition ${range === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{RANGE_LABELS[value]}</button>
-          ))}
+        <div className="flex flex-col items-end gap-1.5">
+          <div className="flex rounded-lg bg-slate-100 p-1 text-[11px] font-semibold">
+            {(Object.keys(RANGE_LABELS) as ActivityRange[]).map(value => (
+              <button key={value} onClick={() => selectRange(value)} className={`rounded-md px-2.5 py-1 transition ${range === value ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{RANGE_LABELS[value]}</button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1 text-[10px]">
+            <button aria-label={previousLabel} title={previousLabel} onClick={() => setPeriodOffset(value => value - 1)} className="flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 text-slate-500 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700"><ChevronLeft size={13} /></button>
+            <span className="min-w-36 text-center font-semibold capitalize text-slate-600">{periodText}</span>
+            <button aria-label={nextLabel} title={nextLabel} onClick={() => setPeriodOffset(value => Math.min(0, value + 1))} disabled={periodOffset >= 0} className="flex h-6 w-6 items-center justify-center rounded-md border border-slate-200 text-slate-500 transition hover:border-blue-300 hover:bg-blue-50 hover:text-blue-700 disabled:cursor-not-allowed disabled:opacity-30"><ChevronRight size={13} /></button>
+            {periodOffset !== 0 && <button onClick={() => setPeriodOffset(0)} className="ml-1 rounded-md bg-blue-50 px-1.5 py-1 font-semibold text-blue-700 hover:bg-blue-100">Текущий</button>}
+          </div>
         </div>
       </div>
       <div className="flex items-center gap-4 text-[10px] text-slate-500">

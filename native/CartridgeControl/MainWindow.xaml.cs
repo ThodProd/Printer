@@ -86,7 +86,7 @@ public partial class MainWindow : Window
             case "load-database": return await database.LoadAsync();
             case "save-database": return await database.SaveAsync(args[0], args.GetArrayLength() > 1 ? args[1] : default);
             case "get-data-folder": return database.Root;
-            case "get-version": return "1.1.17";
+            case "get-version": return "1.1.18";
             case "get-printers": return await Task.Run(NativePrinter.GetPrinters);
             case "ping-printer": return await Task.Run(() => NativePrinter.Ping(args[0].GetString()!));
             case "raw-print": return await NativePrinter.PrintAsync(args[0].GetString()!, args[1].GetString()!, args.GetArrayLength() > 2 ? args[2].GetString() ?? "raw" : "raw");

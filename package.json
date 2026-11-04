@@ -1,7 +1,7 @@
 {
   "name": "cartridge-control",
   "productName": "CartridgeControl",
-  "version": "1.1.17",
+  "version": "1.1.18",
   "private": true,
   "type": "module",
   "description": "Система учёта картриджей с печатью этикеток",

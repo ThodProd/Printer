@@ -195,6 +195,8 @@ export interface AppSettings {
   showTechLogs: boolean;
   /** Allow destructive corrections of already recorded warehouse events. */
   enableEventEditing?: boolean;
+  /** Allow a previously recorded printer firmware mark to be removed in the printer editor. */
+  allowFirmwareUncheck?: boolean;
   /** How to send label data to printer. raw = WinSpool RAW API, driver = Windows print command fallback. */
   labelPrintMode: 'raw' | 'driver';
 }
@@ -230,6 +232,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   barcodeKey: 'id',
   showTechLogs: false,
   enableEventEditing: false,
+  allowFirmwareUncheck: false,
   labelPrintMode: 'driver',
 };
 

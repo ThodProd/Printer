@@ -847,6 +847,75 @@ export const useStore = () => {
     setPrinters(prev => prev.map(p => (p.inventoryNumber === inventoryNumber ? { ...p, ...updates } : p)));
   };
 
+  /** Link selected on-hand/waiting consumables to a device repair so the whole bundle moves through warehouse stages together. */
+  const linkConsumablesToRepair = (repairId: string, printerInventoryNumber: string, consumableIds: string[], submitter?: string) => {
+    const selected = new Set(consumableIds);
+    cartridges
+      .filter(cartridge => selected.has(cartridge.id) && cartridge.printerInventoryNumber === printerInventoryNumber && !cartridge.isReplaced)
+      .forEach(cartridge => {
+        if (cartridge.status === 'on_hand') {
+          updateCartridgeStatus(cartridge.id, 'waiting', 'Принят на склад вместе с принтером', submitter);
+          updateCartridge(cartridge.id, { linkedRepairId: repairId });
+        } else if (cartridge.status === 'waiting') {
+          updateCartridge(cartridge.id, { linkedRepairId: repairId });
+        }
+      });
+  };
+
+  /**
+   * Complete a device repair atomically across repairs, linked consumables, warehouse rows,
+   * shipment snapshots and legacy batches. Safe for completion before or after shipment.
+   */
+  const completeRepairWorkflow = (repairId: string, solutionRaw: string, markFirmware = false) => {
+    const repair = repairs.find(item => item.id === repairId);
+    if (!repair || repair.locationStatus === 'issued') return false;
+    const printer = printers.find(item => item.inventoryNumber === repair.printerInventoryNumber);
+    const deviceId = printer?.programId ?? repair.printerInventoryNumber;
+    const solution = solutionRaw.trim() || 'Ремонт завершён';
+    const linked = cartridges.filter(cartridge => cartridge.linkedRepairId === repairId);
+    const linkedIds = new Set(linked.map(cartridge => cartridge.id));
+    const matches = (item: { id: string; repairId?: string; parentDeviceId?: string }) =>
+      item.repairId === repairId || item.id === deviceId || item.parentDeviceId === deviceId || linkedIds.has(item.id);
+    const now = new Date().toISOString();
+
+    updateRepair(repairId, { status: 'repaired', locationStatus: 'ready', completionDate: now, repairDescription: solution });
+    linked.forEach(cartridge => {
+      if (cartridge.status === 'waiting' || cartridge.status === 'at_refill') {
+        updateCartridgeStatus(cartridge.id, 'received_from_refill', 'Ремонт завершён — готов к выдаче вместе с принтером');
+      }
+    });
+    if (printer) {
+      const updates: Partial<Printer> = {};
+      if (repair.status !== 'repaired') updates.repairCount = (printer.repairCount ?? 0) + 1;
+      if (markFirmware && !printer.firmwareFlashed) updates.firmwareFlashed = true;
+      if (Object.keys(updates).length > 0) updatePrinter(printer.inventoryNumber, updates);
+    }
+
+    const completedBatchIds = new Set(warehouseLedger.shipmentBatches
+      .filter(batch => batch.items.some(matches) && !batch.items.some(item => item.status === 'at_refill' && !matches(item)))
+      .map(batch => batch.id));
+    setWarehouseLedger(previous => ({
+      ...previous,
+      items: previous.items.map(item => matches(item) && (item.status === 'waiting' || item.status === 'at_refill')
+        ? { ...item, status: 'ready' as const, currentBatchId: undefined }
+        : item),
+      shipmentBatches: previous.shipmentBatches.map(batch => {
+        if (!batch.items.some(matches)) return batch;
+        const items = batch.items.map(item => matches(item) && item.status === 'at_refill' ? { ...item, status: 'ready' as const } : item);
+        const completed = !items.some(item => item.status === 'at_refill');
+        return { ...batch, items, status: completed && batch.status === 'sent' ? 'received' as const : batch.status, dateReceived: completed ? (batch.dateReceived ?? now) : batch.dateReceived };
+      }),
+    }));
+    setBatchesState(previous => previous.map(batch => completedBatchIds.has(batch.id) ? { ...batch, status: 'received' as const } : batch));
+    setRefillLog(previous => [{
+      id: crypto.randomUUID(), date: now, cartridgeId: deviceId, cartridgeModel: printer?.model ?? 'Устройство',
+      consumableType: 'device', deviceType: printer?.printerType ?? 'Устройство', serviceType: 'Ремонт',
+      printerInventoryNumber: repair.printerInventoryNumber, printerModel: printer?.model ?? '', department: printer?.department ?? '',
+      employee: printer?.boss, action: `Принтер получен с ремонта. Решение: ${solution}`, is_technical: false,
+    }, ...previous]);
+    return true;
+  };
+
   const upsertModelMapping = (originalModel: string | null, mapping: PrinterModelMapping) => {
     const cleaned: PrinterModelMapping = {
       printerModel: mapping.printerModel.trim(),
@@ -905,6 +974,8 @@ export const useStore = () => {
     addPrinter,
     removePrinter,
     updatePrinter,
+    linkConsumablesToRepair,
+    completeRepairWorkflow,
     addCartridge,
     removeCartridge,
     allocateConsumableSlot,

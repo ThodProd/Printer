@@ -21,6 +21,7 @@ import {
 import { Cartridge, Printer, HistoryEntry, STATUS_LABELS, STATUS_COLORS } from '../types';
 import { StoreType } from '../store';
 import { buildTSPLLabel, getTemplate } from '../utils/tspl';
+import { ask } from '../utils/dialogs';
 
 const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const [query, setQuery] = useState('');
@@ -73,6 +74,7 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const getLatestRepair = (invNum: string) => [...(repairsByPrinter.get(invNum) ?? [])].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime())[0];
 
   const handlePrintCartridge = async (cartridge: Cartridge) => {
+    if (cartridge.labelPrinted && !await ask(`Внимание! Этикетка на расходник ${cartridge.id} уже была напечатана. Напечатать повторно?`)) return;
     if (!store.settings.labelPrinterName) {
       setPrintStatus({ text: 'Принтер этикеток не выбран (Настройки)', ok: false });
       return;
@@ -98,6 +100,10 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
       status: STATUS_LABELS[cartridge.status],
     });
     const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    if (res.success) {
+      store.updateCartridge(cartridge.id, { labelPrinted: true });
+      if (selectedCartridge?.id === cartridge.id) setSelectedCartridge({ ...selectedCartridge, labelPrinted: true });
+    }
     store.recordAction({
       category: 'cartridge', entityId: cartridge.id, cartridgeId: cartridge.id, cartridgeModel: cartridge.model,
       consumableType: cartridge.consumableType, printerInventoryNumber: cartridge.printerInventoryNumber,
@@ -421,6 +427,20 @@ const SearchTab: React.FC<{ store: StoreType }> = ({ store }) => {
                     </div>
                   </div>
                 </div>
+
+                <label className="mb-3 flex cursor-pointer select-none items-center gap-2 rounded-lg border border-gray-100 bg-gray-50 p-2.5">
+                  <input
+                    type="checkbox"
+                    aria-label={`Этикетка напечатана ${selectedCartridge.id}`}
+                    className="h-4 w-4 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    checked={Boolean(selectedCartridge.labelPrinted)}
+                    onChange={event => {
+                      store.updateCartridge(selectedCartridge.id, { labelPrinted: event.target.checked });
+                      setSelectedCartridge({ ...selectedCartridge, labelPrinted: event.target.checked });
+                    }}
+                  />
+                  <span className="text-xs font-semibold text-gray-700">Этикетка на этот расходник уже напечатана</span>
+                </label>
 
                 {/* Print button for cartridge */}
                 <button

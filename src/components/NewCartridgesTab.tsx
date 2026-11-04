@@ -296,7 +296,7 @@ const NewCartridgesTab: React.FC<{ store: StoreType }> = ({ store }) => {
                         >
                           −
                         </button>
-                        <span className="font-bold min-w-6 text-center">{item.quantity}</span>
+                        <span className={`min-w-6 text-center font-bold ${item.quantity === 0 ? 'text-red-600' : ''}`}>{item.quantity}</span>
                         <button
                           onClick={() => changeQuantity(item.id, 1)}
                           className="h-6 w-6 rounded border text-gray-600 hover:bg-gray-50"

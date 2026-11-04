@@ -20,6 +20,8 @@ interface NewRepairForm {
   reason: string;
   technician: string;
   comment: string;
+  includeCartridges: boolean;
+  selectedCartridgeIds: string[];
 }
 
 const EMPTY_FORM: NewRepairForm = {
@@ -27,6 +29,8 @@ const EMPTY_FORM: NewRepairForm = {
   reason: '',
   technician: '',
   comment: '',
+  includeCartridges: false,
+  selectedCartridgeIds: [],
 };
 
 const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
@@ -84,10 +88,14 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
       date: new Date().toISOString(),
       reason: newRepair.reason,
       status: 'in_repair',
+      locationStatus: 'waiting',
       technician: newRepair.technician || undefined,
       comment: newRepair.comment || undefined,
     };
     store.addRepair(repair);
+    if (newRepair.includeCartridges) {
+      store.linkConsumablesToRepair(repair.id, repair.printerInventoryNumber, newRepair.selectedCartridgeIds, newRepair.technician || undefined);
+    }
     setNewRepair(EMPTY_FORM);
     setPrinterSearch('');
     setShowAdd(false);
@@ -96,13 +104,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const handleFinishRepair = (e: React.FormEvent) => {
     e.preventDefault();
     if (!showFinish) return;
-    store.updateRepair(showFinish.id, {
-      status: 'repaired',
-      completionDate: new Date().toISOString(),
-      repairDescription: repairDescription || undefined,
-    });
-    const printer = store.printers.find(item => item.inventoryNumber === showFinish.printerInventoryNumber);
-    if (firmwareOnComplete && printer && !printer.firmwareFlashed) store.updatePrinter(printer.inventoryNumber, { firmwareFlashed: true });
+    store.completeRepairWorkflow(showFinish.id, repairDescription, firmwareOnComplete);
     setShowFinish(null);
     setRepairDescription('');
     setFirmwareOnComplete(false);
@@ -284,7 +286,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 {newRepair.printerInventoryNumber && (
                   <div className="mb-1 px-3 py-1.5 bg-blue-50 border border-blue-200 rounded-lg text-sm text-blue-700 font-semibold flex items-center justify-between">
                     <span>{getPrinterLabel(newRepair.printerInventoryNumber)}</span>
-                    <button type="button" onClick={() => setNewRepair({ ...newRepair, printerInventoryNumber: '' })} className="text-blue-400 hover:text-blue-600">
+                    <button type="button" onClick={() => setNewRepair({ ...newRepair, printerInventoryNumber: '', includeCartridges: false, selectedCartridgeIds: [] })} className="text-blue-400 hover:text-blue-600">
                       <X size={14} />
                     </button>
                   </div>
@@ -303,6 +305,7 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                               ...newRepair,
                               printerInventoryNumber: p.inventoryNumber,
                               technician: newRepair.technician || p.boss || '',
+                              selectedCartridgeIds: store.cartridges.filter(cartridge => cartridge.printerInventoryNumber === p.inventoryNumber && !cartridge.isReplaced && (cartridge.status === 'on_hand' || cartridge.status === 'waiting')).map(cartridge => cartridge.id),
                             });
                             setPrinterSearch('');
                           }}
@@ -346,6 +349,17 @@ const RepairTab: React.FC<{ store: StoreType }> = ({ store }) => {
                   onChange={e => setNewRepair({ ...newRepair, comment: e.target.value })}
                 />
               </div>
+              <label className={`flex cursor-pointer items-start gap-2 rounded-xl border p-3 ${newRepair.includeCartridges ? 'border-blue-300 bg-blue-50' : 'border-gray-200 bg-gray-50/60'}`}>
+                <input type="checkbox" checked={newRepair.includeCartridges} onChange={event => setNewRepair({ ...newRepair, includeCartridges: event.target.checked })} className="mt-0.5 h-4 w-4 rounded accent-blue-600" />
+                <span><span className="block text-sm font-semibold text-gray-700">Отправить расходники вместе с принтером</span><span className="block text-[10px] text-gray-400">Выбранные картриджи и драмы будут двигаться по складам вместе с устройством</span></span>
+              </label>
+              {newRepair.includeCartridges && newRepair.printerInventoryNumber && <div className="max-h-36 space-y-1 overflow-y-auto rounded-lg border border-gray-200 p-2">
+                {store.cartridges.filter(cartridge => cartridge.printerInventoryNumber === newRepair.printerInventoryNumber && !cartridge.isReplaced && (cartridge.status === 'on_hand' || cartridge.status === 'waiting')).map(cartridge => <label key={cartridge.id} className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-gray-50">
+                  <input type="checkbox" checked={newRepair.selectedCartridgeIds.includes(cartridge.id)} onChange={() => setNewRepair({ ...newRepair, selectedCartridgeIds: newRepair.selectedCartridgeIds.includes(cartridge.id) ? newRepair.selectedCartridgeIds.filter(id => id !== cartridge.id) : [...newRepair.selectedCartridgeIds, cartridge.id] })} className="h-3.5 w-3.5 rounded accent-blue-600" />
+                  <span className="font-mono font-bold text-blue-700">{cartridge.id}</span><span className="text-gray-600">{cartridge.consumableType === 'drum' ? 'Драм' : 'Картридж'} · {cartridge.model}</span>
+                </label>)}
+                {store.cartridges.filter(cartridge => cartridge.printerInventoryNumber === newRepair.printerInventoryNumber && !cartridge.isReplaced && (cartridge.status === 'on_hand' || cartridge.status === 'waiting')).length === 0 && <div className="p-2 text-center text-xs italic text-gray-400">Нет доступных расходников</div>}
+              </div>}
               <div className="flex space-x-2 pt-2">
                 <button type="button" onClick={() => setShowAdd(false)}
                   className="flex-1 py-2.5 border rounded-lg text-sm hover:bg-gray-50">Отмена</button>

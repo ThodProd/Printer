@@ -2,7 +2,7 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF><Nullable>enable</Nullable><ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>CartridgeControl</AssemblyName><Version>1.1.17</Version>
+    <AssemblyName>CartridgeControl</AssemblyName><Version>1.1.18</Version>
     <ApplicationIcon>../../build/icon.ico</ApplicationIcon><ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
   <ItemGroup>

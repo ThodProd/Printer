@@ -2,14 +2,14 @@ import React, { useMemo } from 'react';
 import WarehouseInventoryPanel, { WarehouseFocusRequest } from './WarehouseInventoryPanel';
 import { StoreType } from '../store';
 
-const InventoryTab: React.FC<{ store: StoreType; attention?: 'waiting' | 'refill' | '' }> = ({
+const InventoryTab: React.FC<{ store: StoreType; attention?: 'waiting' | 'refill' | 'ready' | '' }> = ({
   store,
   attention = '',
 }) => {
   const focusRequest = useMemo<WarehouseFocusRequest | null>(() => {
     if (!attention) return null;
     return {
-      section: attention === 'refill' ? 'at_refill' : 'waiting',
+      section: attention === 'refill' ? 'at_refill' : attention,
       tick: Date.now(),
     };
   }, [attention]);

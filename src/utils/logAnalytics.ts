@@ -77,11 +77,11 @@ export function latestJournalDate(entries: RefillLogEntry[]): Date {
   return new Date(times.length ? Math.max(...times) : Date.now());
 }
 
-export function buildActivitySeries(entries: RefillLogEntry[], range: ActivityRange): ActivityPoint[] {
+export function buildActivitySeries(entries: RefillLogEntry[], range: ActivityRange, selectedPeriod?: Date): ActivityPoint[] {
   const refills = businessEvents(entries, 'refill_start');
   const issues = businessEvents(entries, 'issue');
   const repairs = businessEvents(entries, 'repair');
-  const anchor = latestJournalDate(entries);
+  const anchor = selectedPeriod ? new Date(selectedPeriod) : latestJournalDate(entries);
   let points: ActivityPoint[] = [];
   let keyForDate: (date: Date) => string;
 

@@ -2,7 +2,7 @@
 #define MyAppPublisher "ThodProd"
 #define MyAppExeName "CartridgeControl.exe"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.17"
+  #define MyAppVersion "1.1.18"
 #endif
 
 [Setup]

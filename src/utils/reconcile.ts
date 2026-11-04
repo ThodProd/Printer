@@ -1,8 +1,7 @@
 import type { Printer } from '../types';
 export const columns = [
   ['boss', 'МатОтв'], ['inventoryNumber', 'ИнвНомер'], ['department', 'Подразделение'],
-  ['printerType', 'Тип'], ['model', 'Модель'], ['cartridgeModels', 'Картриджи'],
-  ['commissionDate', 'Дата'], ['balanceCost', 'Стоимость'],
+  ['printerType', 'Тип'], ['model', 'Модель'], ['commissionDate', 'Дата'], ['balanceCost', 'Стоимость'],
 ] as const;
 export type Field = Exclude<typeof columns[number][0], 'inventoryNumber'>;
 export type Change = { inventoryNumber: string; field: Field; before: string | string[]; after: string | string[] };
@@ -11,6 +10,13 @@ export type ReferenceRowAction =
   | { kind: 'remove'; inventoryNumber: string; before: Printer }
   | { kind: 'decommission'; inventoryNumber: string; before: Printer };
 export const displayValue = (value: string | string[] | undefined) => Array.isArray(value) ? value.join(', ') : value ?? '';
+export const displayFieldValue = (field: typeof columns[number][0], value: string | string[] | undefined) => {
+  if (field === 'printerType') {
+    if (value === 'printer') return 'Принтер';
+    if (value === 'mfu') return 'МФУ';
+  }
+  return displayValue(value);
+};
 export const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
 export const inventoryKey = (value: string) => value.replace(/^\s*Инв\.\s*№\s*/i, '').trim();
 
@@ -38,19 +44,32 @@ export function parseDelimited(text: string, delimiter: string): string[][] {
 export function parseReference(rows: string[][]): Printer[] {
   if (!rows.length) throw new Error('Файл пуст.');
   const header = rows[0].map(s => s.trim());
-  if (!columns.every(([, label], i) => header[i] === label) || header.length !== columns.length)
-    throw new Error('Первая строка должна содержать заголовки из шаблона в указанном порядке.');
+  const currentHeader = columns.map(([, label]) => label);
+  const legacyHeader = ['МатОтв', 'ИнвНомер', 'Подразделение', 'Тип', 'Модель', 'Картриджи', 'Дата', 'Стоимость'];
+  if (new Set(header).size !== header.length) throw new Error('В первой строке есть повторяющиеся названия столбцов.');
+  const hasColumns = (expected: string[]) => header.length === expected.length && expected.every(label => header.includes(label));
+  const currentFormat = hasColumns(currentHeader);
+  const legacyFormat = hasColumns(legacyHeader);
+  if (!currentFormat && !legacyFormat) throw new Error(`Первая строка обязательна и должна содержать названия столбцов шаблона: ${currentHeader.join(', ')}. Порядок столбцов может быть любым.`);
+  const indexOf = (label: string) => header.indexOf(label);
   const seen = new Set<string>();
   return rows.slice(1).filter(r => r.some(c => c.trim())).map((row, i) => {
-    if (row.length !== columns.length) throw new Error(`Строка ${i + 2}: нужно 8 столбцов, получено ${row.length}.`);
-    const [boss, rawInventory, department, type, model, cartridges, commissionDate, balanceCost] = row.map(s => s.trim());
+    if (row.length !== header.length) throw new Error(`Строка ${i + 2}: нужно ${header.length} столбцов, получено ${row.length}.`);
+    const values = row.map(value => String(value ?? '').trim());
+    const value = (label: string) => values[indexOf(label)] ?? '';
+    const boss = value('МатОтв');
+    const rawInventory = value('ИнвНомер');
+    const department = value('Подразделение');
+    const type = value('Тип');
+    const model = value('Модель');
+    const commissionDate = value('Дата');
+    const balanceCost = value('Стоимость');
     const inventoryNumber = inventoryKey(rawInventory);
     if (!inventoryNumber) throw new Error(`Строка ${i + 2}: пустой инвентарный номер.`);
     if (seen.has(inventoryNumber)) throw new Error(`Дубль инвентарного номера ${inventoryNumber}, строка ${i + 2}.`);
     seen.add(inventoryNumber);
     const printerType = /^(принтер|printer)$/i.test(type) ? 'printer' : /^(мфу|mfu)$/i.test(type) ? 'mfu' : type;
-    return { inventoryNumber, boss, department, printerType, model, commissionDate, balanceCost,
-      cartridgeModels: cartridges.split(',').map(s => s.trim()).filter(Boolean) };
+    return { inventoryNumber, boss, department, printerType, model, commissionDate, balanceCost, cartridgeModels: [], drumModels: [] };
   });
 }
 export function uniquePrinters(printers: Printer[]): Map<string, Printer> {

@@ -56,7 +56,7 @@ const App: React.FC = () => {
   const store = useStore();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showAbout, setShowAbout] = useState(false);
-  const [inventoryAttention, setInventoryAttention] = useState<'waiting' | 'refill' | ''>('');
+  const [inventoryAttention, setInventoryAttention] = useState<'waiting' | 'refill' | 'ready' | ''>('');
   const scanBufferRef = useRef('');
   const lastScanKeyRef = useRef(0);
   const scanStartRef = useRef(0);
@@ -116,8 +116,9 @@ const App: React.FC = () => {
 
   const waiting  = store.cartridges.filter(c => c.status === 'waiting').length;
   const atRefill = store.cartridges.filter(c => c.status === 'at_refill').length;
+  const readyToIssue = store.cartridges.filter(c => c.status === 'received_from_refill' || c.status === 'ready').length;
   const repairs  = store.repairs.filter(r => r.status === 'in_repair' || r.status === 'waiting').length;
-  const openIndicator = (tab: string, warehouse?: 'waiting' | 'refill') => {
+  const openIndicator = (tab: string, warehouse?: 'waiting' | 'refill' | 'ready') => {
     setActiveTab(tab);
     if (tab === 'inventory' && warehouse) {
       setInventoryAttention(warehouse);
@@ -152,32 +153,37 @@ const App: React.FC = () => {
           <BarcodeIcon size={24} />
           <div>
             <h1 className="text-base font-bold uppercase tracking-wider leading-tight">Cartridge Control</h1>
-            <p className="text-xs opacity-60 leading-tight">Система учёта картриджей v1.1.17</p>
+            <p className="text-xs opacity-60 leading-tight">Система учёта картриджей v1.1.18</p>
           </div>
         </div>
         <div className="flex items-center space-x-3 text-sm">
           {waiting > 0 && (
             <button onClick={() => openIndicator('inventory', 'waiting')} className="bg-yellow-400 text-yellow-900 px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-yellow-300 hover:shadow-md" title="Открыть склад ожидающих отправки">
-              ⏳ {waiting} ожидают
+              {waiting} ожидают
             </button>
           )}
           {atRefill > 0 && (
             <button onClick={() => openIndicator('inventory', 'refill')} className="bg-purple-400 text-white px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-purple-300 hover:shadow-md" title="Открыть партии на заправке">
-              🔄 {atRefill} на заправке
+              {atRefill} на заправке
+            </button>
+          )}
+          {readyToIssue > 0 && (
+            <button onClick={() => openIndicator('inventory', 'ready')} className="bg-emerald-500 text-white px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-emerald-400 hover:shadow-md" title="Открыть склад готовых к выдаче">
+              {readyToIssue} готовы к выдаче
             </button>
           )}
           {repairs > 0 && (
             <button onClick={() => openIndicator('repair')} className="bg-orange-400 text-white px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-orange-300 hover:shadow-md" title="Открыть ремонт">
-              🔧 {repairs} в ремонте
+              {repairs} в ремонте
             </button>
           )}
           {store.settings.labelPrinterName ? (
             <button onClick={() => openIndicator('settings')} className="max-w-52 truncate bg-green-600 text-white px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-green-500 hover:shadow-md" title="Открыть настройки принтера этикеток">
-              🖨 {store.settings.labelPrinterName}
+              {store.settings.labelPrinterName}
             </button>
           ) : (
             <button onClick={() => openIndicator('settings')} className="bg-orange-500 text-white px-2.5 py-1 rounded-full text-xs font-bold transition hover:bg-orange-400 hover:shadow-md" title="Выбрать принтер этикеток">
-              ⚠ Принтер не выбран
+              Принтер не выбран
             </button>
           )}
           <button
@@ -240,7 +246,7 @@ const App: React.FC = () => {
               <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 space-y-2">
                 <div className="font-bold text-blue-800 text-base">Cartridge Control</div>
                 <div className="text-blue-700 text-xs">Система учёта картриджей и принтеров</div>
-                <div className="text-blue-600 text-xs font-mono">Версия 1.1.17</div>
+                <div className="text-blue-600 text-xs font-mono">Версия 1.1.18</div>
               </div>
               <div className="space-y-1.5">
                 <div className="flex justify-between">

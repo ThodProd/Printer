@@ -129,6 +129,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
       showPreviewBeforePrint: cfg.showPreviewBeforePrint,
       soundNotification: cfg.soundNotification,
       enableEventEditing: cfg.enableEventEditing,
+      allowFirmwareUncheck: cfg.allowFirmwareUncheck,
     });
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
@@ -496,6 +497,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
               { key: 'showPreviewBeforePrint', label: 'Показывать предпросмотр перед печатью', hint: 'Открывает окно подтверждения с превью' },
               { key: 'soundNotification', label: 'Звук после успешного сканирования', hint: 'Короткий сигнал при обработке штрих-кода' },
               { key: 'enableEventEditing', label: 'Разрешить редактирование и отмену складских событий', hint: 'Показывает отмену партий, изменение истории и другие корректирующие действия' },
+              { key: 'allowFirmwareUncheck', label: 'Разрешить снимать отметку «Прошит»', hint: 'Позволяет убрать ранее установленную отметку в редакторе принтера' },
             ].map(({ key, label, hint }) => {
               const val = (cfg as unknown as Record<string, boolean>)[key];
               return (
@@ -569,7 +571,7 @@ const SettingsTab: React.FC<{ store: StoreType }> = ({ store }) => {
             <h3 className="font-bold text-blue-800 text-sm">О программе</h3>
             <div className="text-sm text-blue-700 space-y-1">
               <div><strong>Cartridge Control</strong> — система учёта картриджей</div>
-              <div>Версия: <strong>1.1.17</strong></div>
+              <div>Версия: <strong>1.1.18</strong></div>
               <div>Создатель: <strong>Спиркин В.А.</strong></div>
             </div>
           </div>

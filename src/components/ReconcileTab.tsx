@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react';
-import { AlertTriangle, Archive, ArrowRight, Check, Database, Eye, EyeOff, FileDown, FileUp, Plus, RotateCcw, Save, ShieldCheck, SkipForward, Trash2 } from 'lucide-react';
+import { AlertTriangle, Archive, ArrowRight, Check, Database, Eye, EyeOff, FileSpreadsheet, FileText, FileUp, Plus, RotateCcw, Save, ShieldCheck, SkipForward, Trash2, X } from 'lucide-react';
 import type { StoreType } from '../store';
 import type { Printer } from '../types';
-import { columns, Change, Field, ReferenceRowAction, displayValue, same, parseDelimited, parseReference, uniquePrinters } from '../utils/reconcile';
+import { columns, Change, Field, ReferenceRowAction, displayFieldValue, same, parseDelimited, parseReference, uniquePrinters } from '../utils/reconcile';
 
 export default function ReconcileTab({ store }: { store: StoreType }) {
   const [source, setSource] = useState<Printer[] | null>(null);
@@ -13,6 +13,8 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(0);
   const [delimiter, setDelimiter] = useState(';');
+  const [fileScope, setFileScope] = useState<'partial' | 'full'>('partial');
+  const [showUploadDialog, setShowUploadDialog] = useState(false);
   const [hideUnchanged, setHideUnchanged] = useState(false);
   const key = (inv: string, field: string) => JSON.stringify([inv, field]);
   const chooseRow = (inventoryNumber: string, decision: 'add' | 'remove' | 'decommission') => setRowDecisions(current => {
@@ -26,10 +28,12 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
     if (!source) return [];
     const current = uniquePrinters(baseline);
     const incoming = uniquePrinters(source);
-    return [...new Set([...current.keys(), ...incoming.keys()])]
+    const inventories = fileScope === 'full' ? [...new Set([...current.keys(), ...incoming.keys()])] : [...incoming.keys()];
+    return inventories
       .sort((a, b) => a.localeCompare(b, 'ru', { numeric: true }))
-      .map(inv => ({ inv, old: current.get(inv), next: incoming.get(inv) }));
-  }, [source, baseline]);
+      .map(inv => ({ inv, old: current.get(inv), next: incoming.get(inv) }))
+      .filter(row => row.next || !row.old?.isDecommissioned);
+  }, [source, baseline, fileScope]);
 
   const changes = useMemo(() => rows.flatMap(row => row.old && row.next ? columns.flatMap(([field]) =>
     field !== 'inventoryNumber' && !same(row.old![field], row.next![field])
@@ -51,9 +55,9 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
   const newRows = rows.filter(row => !row.old).length;
   const missingRows = rows.filter(row => !row.next).length;
 
-  const load = async (file?: File) => {
+  const load = async (file?: File, scope: 'partial' | 'full' = fileScope) => {
     if (!file) return;
-    setBusy(true); setMessage('Чтение и сверка файла…'); setSource(null); setDecisions({}); setRowDecisions({}); setPage(0); setHideUnchanged(false);
+    setFileScope(scope); setBusy(true); setMessage('Чтение и сверка файла…'); setSource(null); setDecisions({}); setRowDecisions({}); setPage(0); setHideUnchanged(false);
     try {
       uniquePrinters(store.printers);
       let data: string[][];
@@ -62,21 +66,43 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
         const book = XLSX.read(await file.arrayBuffer(), { type: 'array' });
         if (book.SheetNames.length !== 1) throw new Error('Оставьте в файле один лист для сверки.');
         data = XLSX.utils.sheet_to_json<string[]>(book.Sheets[book.SheetNames[0]], { header: 1, raw: false, defval: '', blankrows: false });
-        data = data.map(row => Array.from({ length: Math.max(8, row.length) }, (_, index) => String(row[index] ?? '')));
+        data = data.map(row => Array.from({ length: Math.max(columns.length, row.length) }, (_, index) => String(row[index] ?? '')));
       } else data = parseDelimited(await file.text(), delimiter);
       const parsed = parseReference(data);
-      setBaseline(store.printers); setSource(parsed); setMessage(`Загружено строк: ${parsed.length}. Проверьте найденные изменения.`);
+      const current = uniquePrinters(store.printers);
+      const incoming = uniquePrinters(parsed);
+      const automaticWriteOffs = scope === 'full'
+        ? Object.fromEntries(store.printers.filter(printer => !printer.isDecommissioned && !incoming.has(printer.inventoryNumber)).map(printer => [printer.inventoryNumber, 'decommission' as const]))
+        : {};
+      const automaticAdditions = Object.fromEntries(parsed.filter(printer => !current.has(printer.inventoryNumber)).map(printer => [printer.inventoryNumber, 'add' as const]));
+      setBaseline(store.printers); setSource(parsed); setRowDecisions({ ...automaticWriteOffs, ...automaticAdditions });
+      const writeOffCount = Object.keys(automaticWriteOffs).length;
+      const additionCount = Object.keys(automaticAdditions).length;
+      setMessage(`Загружено строк: ${parsed.length}. Проверьте найденные изменения.${additionCount ? ` Новых устройств к добавлению: ${additionCount}.` : ''}${writeOffCount ? ` Отсутствуют в файле и будут списаны: ${writeOffCount}.` : ''}`);
     } catch (error) { setMessage(String(error)); }
     finally { setBusy(false); }
   };
 
-  const template = () => {
+  const templateRows = () => [
+    columns.map(([, label]) => label),
+    ...store.printers.map(printer => columns.map(([field]) => displayFieldValue(field, printer[field]))),
+  ];
+
+  const downloadTextTemplate = () => {
     const escape = (value: string) => `"${value.replace(/"/g, '""')}"`;
-    const text = [columns.map(([, label]) => label), ...store.printers.map(printer => columns.map(([field]) => displayValue(printer[field])))]
-      .map(row => row.map(escape).join(delimiter)).join('\r\n');
+    const text = templateRows().map(row => row.map(escape).join(delimiter)).join('\r\n');
     const url = URL.createObjectURL(new Blob(['\uFEFF' + text], { type: 'text/plain;charset=utf-8' }));
-    const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'reference-template.txt'; anchor.click();
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'Шаблон-сверки-базы.txt'; anchor.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const downloadExcelTemplate = async () => {
+    const XLSX = await import('xlsx');
+    const sheet = XLSX.utils.aoa_to_sheet(templateRows());
+    sheet['!cols'] = columns.map(([field]) => ({ wch: field === 'boss' || field === 'department' || field === 'model' ? 28 : 17 }));
+    const book = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(book, sheet, 'Шаблон сверки');
+    XLSX.writeFile(book, 'Шаблон-сверки-базы.xlsx');
   };
 
   const save = async () => {
@@ -105,26 +131,60 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
         </div>
         <div className="flex items-center gap-1.5 rounded-lg border border-green-200 bg-green-50 px-2.5 py-1.5 text-[11px] font-semibold text-green-700"><ShieldCheck size={14} /><span>Резервная копия перед сохранением</span></div>
       </div>
-      <div className="grid gap-px bg-gray-100 sm:grid-cols-3">
-        {[
-          ['1', 'Скачайте шаблон', 'В нём уже есть текущая база'], ['2', 'Внесите изменения', 'Не меняйте инвентарные номера'], ['3', 'Загрузите и проверьте', 'Примите нужные ячейки'],
-        ].map(([number, title, hint]) => <div key={number} className="flex gap-2.5 bg-white px-4 py-3"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[10px] font-bold text-white">{number}</span><div><div className="text-xs font-bold text-gray-800">{title}</div><div className="mt-0.5 text-[11px] text-gray-400">{hint}</div></div></div>)}
+      <div className="grid gap-px bg-gray-100 lg:grid-cols-3">
+        <div className="flex gap-2.5 bg-white px-4 py-3.5">
+          <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[10px] font-bold text-white">1</span>
+          <div className="min-w-0 flex-1"><div className="text-sm font-bold text-gray-800">Скачайте шаблон заполнения</div><div className="mt-1 text-[13px] leading-5 text-gray-600">Скачайте Excel- или TXT-шаблон. В нём уже есть обязательная первая строка с правильными названиями столбцов и данные текущей базы.</div>
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              <button disabled={busy} onClick={downloadTextTemplate} className="ui-compact-button border-gray-200 bg-white text-gray-700 hover:bg-gray-50"><FileText size={13} /><span>Текстовый шаблон</span></button>
+              <button disabled={busy} onClick={() => void downloadExcelTemplate()} className="ui-compact-button border-green-200 bg-green-50 text-green-700 hover:bg-green-100"><FileSpreadsheet size={13} /><span>Excel-шаблон</span></button>
+              <select aria-label="Разделитель текстового шаблона" value={delimiter} onChange={event => setDelimiter(event.target.value)} className="h-7 rounded-lg border border-gray-200 bg-white px-2 text-[10px] text-gray-600 outline-none focus:border-blue-400"><option value=";">TXT: точка с запятой</option><option value="\t">TXT: табуляция</option></select>
+            </div>
+          </div>
+        </div>
+        <div className="flex gap-2.5 bg-white px-4 py-3.5"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[10px] font-bold text-white">2</span><div><div className="text-sm font-bold text-gray-800">Внесите данные</div><div className="mt-1 text-[13px] leading-5 text-gray-600">Первую строку с названиями столбцов обязательно сохраните. Сами столбцы можно переставлять в любом порядке — программа найдёт данные по их названиям. Строки принтеров также можно располагать в любом порядке. Один принтер — одна строка; можно подготовить всю базу или только нужную часть. В TXT используйте выбранный разделитель.</div></div></div>
+        <div className="flex gap-2.5 bg-white px-4 py-3.5"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-gray-900 text-[10px] font-bold text-white">3</span><div className="min-w-0 flex-1"><div className="text-sm font-bold text-gray-800">Загрузите и проверьте</div><div className="mt-1 text-[13px] leading-5 text-gray-600">Нажмите «Выбрать файл базы», укажите режим: часть базы или база целиком. После загрузки проверьте найденные изменения и только затем примените нужные.</div><button type="button" disabled={busy} onClick={() => setShowUploadDialog(true)} className="ui-compact-button mt-2 border-blue-600 bg-blue-600 text-white hover:bg-blue-700"><FileUp size={13} /><span>{busy ? 'Загрузка…' : 'Выбрать файл базы'}</span></button></div></div>
       </div>
-      <div className="flex flex-wrap items-center gap-2.5 px-5 py-4">
-        <select aria-label="Разделитель" value={delimiter} onChange={event => setDelimiter(event.target.value)} className="h-8 rounded-lg border border-gray-200 bg-white px-2.5 text-xs text-gray-700 outline-none focus:border-blue-400"><option value=";">Разделитель: точка с запятой</option><option value="\t">Разделитель: табуляция</option></select>
-        <button disabled={busy} onClick={template} className="ui-compact-button border-gray-200 bg-white text-gray-700 hover:bg-gray-50"><FileDown size={14} /><span>Скачать шаблон с текущими данными</span></button>
-        <label className="ui-compact-button cursor-pointer border-blue-600 bg-blue-600 text-white hover:bg-blue-700"><FileUp size={14} /><span>{busy ? 'Загрузка…' : 'Загрузить новую базу'}</span><input type="file" accept=".txt,.csv,.tsv,.xlsx,.xls" disabled={busy} className="sr-only" onChange={event => { void load(event.target.files?.[0]); event.target.value = ''; }} /></label>
+      <div className="flex flex-wrap items-center gap-2.5 px-5 py-3">
         <details className="group w-full min-w-0 basis-full text-[11px] text-gray-500">
           <summary className="ml-auto w-fit cursor-pointer select-none rounded-lg px-2 py-1.5 hover:bg-gray-50 hover:text-gray-700 max-sm:ml-0">Формат и порядок столбцов</summary>
           <div className="mt-2 w-full min-w-0 rounded-xl border border-gray-200 bg-gray-50/70 p-3">
             <div className="grid min-w-0 grid-cols-1 gap-1.5 sm:grid-cols-2 lg:grid-cols-4">
               {columns.map(([, label], index) => <div key={label} className="flex min-w-0 items-center gap-2 rounded-lg border border-gray-100 bg-white px-2 py-1.5"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[9px] font-bold text-blue-700">{index + 1}</span><span className="min-w-0 break-words leading-4 text-gray-600">{label}</span></div>)}
             </div>
-            <p className="mt-2 break-words leading-5 text-gray-500">TXT/CSV в UTF-8 или Excel с одним листом. Ведущие нули храните как текст. Пустая ячейка предлагает очистить поле. Картриджи разделяются запятыми.</p>
+            <p className="mt-2 break-words text-[13px] leading-5 text-gray-600">Первая строка с названиями столбцов обязательна. Столбцы и строки принтеров можно располагать в любом порядке: программа сопоставляет столбцы по названиям, а устройства — по инвентарным номерам. TXT/CSV должен быть в UTF-8, Excel — с одним листом. Ведущие нули храните как текст. Пустая ячейка предлагает очистить поле. Тип устройства указывается по-русски: «Принтер» или «МФУ». Модели картриджей заполнять не нужно — программа сохраняет их у существующих устройств и автоматически подбирает для новых.</p>
           </div>
         </details>
       </div>
     </section>
+
+    {showUploadDialog && <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-[2px]" onMouseDown={event => { if (event.target === event.currentTarget) setShowUploadDialog(false); }}>
+      <section role="dialog" aria-modal="true" aria-labelledby="reconcile-upload-title" className="w-full max-w-lg overflow-hidden rounded-2xl border border-white/60 bg-white shadow-2xl">
+        <div className="flex items-start justify-between border-b border-slate-100 px-5 py-4"><div><h3 id="reconcile-upload-title" className="text-lg font-bold text-slate-900">Как загрузить базу?</h3><p className="mt-1 text-xs text-slate-500">Выберите, какую часть базы содержит подготовленный файл.</p></div><button type="button" aria-label="Закрыть окно загрузки" onClick={() => setShowUploadDialog(false)} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X size={17} /></button></div>
+        <div className="p-5">
+          <div className="grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+            <button type="button" aria-pressed={fileScope === 'partial'} onClick={() => setFileScope('partial')} className={`rounded-lg px-3 py-2.5 text-center text-[13px] font-bold transition ${fileScope === 'partial' ? 'bg-white text-blue-700 shadow-sm ring-1 ring-blue-100' : 'text-slate-500 hover:text-slate-800'}`}>Загрузка части базы</button>
+            <button type="button" aria-pressed={fileScope === 'full'} onClick={() => setFileScope('full')} className={`rounded-lg px-3 py-2.5 text-center text-[13px] font-bold transition ${fileScope === 'full' ? 'bg-white text-amber-700 shadow-sm ring-1 ring-amber-100' : 'text-slate-500 hover:text-slate-800'}`}>База целиком</button>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className={`rounded-xl border p-3 text-[11px] leading-5 transition ${fileScope === 'partial' ? 'border-blue-200 bg-blue-50/70 text-blue-800' : 'border-slate-100 bg-slate-50 text-slate-400'}`}><div className="mb-1 flex items-center gap-1.5 text-xs font-bold"><span className="flex h-4 w-4 items-center justify-center rounded-full bg-blue-100 text-blue-700">!</span>Безопасно для части</div>Отсутствующие в файле принтеры не изменятся и не будут предложены к списанию.</div>
+            <div className={`rounded-xl border p-3 text-[11px] leading-5 transition ${fileScope === 'full' ? 'border-amber-200 bg-amber-50/80 text-amber-900' : 'border-slate-100 bg-slate-50 text-slate-400'}`}><div className="mb-1 flex items-center gap-1.5 text-xs font-bold"><span className="flex h-4 w-4 items-center justify-center rounded-full bg-amber-100 text-amber-700">!</span>Проверка всей базы</div>Инвентарные номера, которых нет в файле, будут отмечены как списанные.</div>
+          </div>
+          <div className="mt-3 flex items-start gap-2 rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5 text-[11px] leading-5 text-violet-800">
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-violet-200 font-black text-violet-800">!</span>
+            <span><strong>Для всех файлов:</strong> первая строка с названиями столбцов обязательна. Столбцы и строки принтеров можно располагать в любом порядке; для TXT/CSV также используйте выбранный разделитель.</span>
+          </div>
+          <div className="mt-2 flex items-start gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-[11px] leading-5 text-emerald-800">
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-emerald-200 font-black text-emerald-800">!</span>
+            <span><strong>Для обоих режимов:</strong> неизвестные инвентарные номера будут определены как новые устройства и отмечены для добавления. ID принтера и расходник программа создаст автоматически после общего сохранения.</span>
+          </div>
+          <div className="mt-5 flex flex-col items-center">
+            <label className="inline-flex cursor-pointer items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-bold text-white shadow-sm transition hover:bg-blue-700"><FileUp size={15} /><span>Загрузить файл</span><input data-testid="reconcile-file-input" type="file" accept=".txt,.csv,.tsv,.xlsx,.xls" className="sr-only" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; setShowUploadDialog(false); void load(file, fileScope); }} /></label>
+            <span className="mt-1.5 text-[11px] font-medium text-slate-500">Excel или TXT / CSV</span>
+          </div>
+        </div>
+      </section>
+    </div>}
 
     {message && <p role="status" className={`rounded-xl border px-3.5 py-2.5 text-xs whitespace-pre-wrap ${messageTone}`}>{message}</p>}
 
@@ -146,16 +206,16 @@ export default function ReconcileTab({ store }: { store: StoreType }) {
               return <tr key={row.inv} className={`group ${rowDecision === 'remove' ? 'bg-red-50/40' : rowDecision === 'decommission' ? 'bg-amber-50/40' : rowDecision === 'add' ? 'bg-green-50/40' : 'hover:bg-blue-50/20'}`}>
               <td className={`sticky left-0 z-[1] min-w-52 border-b border-gray-100 px-3 py-2.5 align-top font-mono font-bold text-gray-800 ${rowDecision === 'remove' ? 'bg-red-50' : rowDecision === 'decommission' ? 'bg-amber-50' : rowDecision === 'add' ? 'bg-green-50' : 'bg-white group-hover:bg-blue-50/70'}`}>
                 {row.inv}
-                {!row.old && <><span className="mt-1 block w-fit rounded bg-orange-50 px-1.5 py-0.5 font-sans text-[9px] text-orange-700">Нет в базе</span><button disabled={busy} onClick={() => chooseRow(row.inv, 'add')} className={`ui-cell-action mt-2 font-sans ${rowDecision === 'add' ? 'border-green-300 bg-green-100 text-green-800' : 'border-green-200 bg-white text-green-700 hover:bg-green-50'}`}><Plus size={10} />{rowDecision === 'add' ? 'Будет добавлен' : 'Добавить в базу'}</button></>}
-                {!row.next && <><span className="mt-1 block w-fit rounded bg-gray-100 px-1.5 py-0.5 font-sans text-[9px] text-gray-500">Нет в файле</span><div className="mt-2 flex flex-col items-start gap-1"><button disabled={busy} onClick={() => chooseRow(row.inv, 'remove')} className={`ui-cell-action font-sans ${rowDecision === 'remove' ? 'border-red-400 bg-red-600 text-white' : 'border-red-200 bg-white text-red-700 hover:bg-red-50'}`}><Trash2 size={10} />{rowDecision === 'remove' ? 'Будет удалён' : 'Удалить из базы'}</button><button disabled={busy} onClick={() => chooseRow(row.inv, 'decommission')} className={`ui-cell-action font-sans ${rowDecision === 'decommission' ? 'border-amber-300 bg-amber-100 text-amber-800' : 'border-gray-200 bg-white text-gray-600 hover:bg-amber-50 hover:text-amber-700'}`}><Archive size={10} />{rowDecision === 'decommission' ? 'Будет списан' : 'Пометить списанным'}</button></div></>}
+                {!row.old && <><span className="mt-1 block w-fit rounded bg-orange-50 px-1.5 py-0.5 font-sans text-[9px] text-orange-700">Нет в базе</span><button disabled={busy} aria-pressed={rowDecision === 'add'} onClick={() => chooseRow(row.inv, 'add')} className={`ui-cell-action mt-2 font-sans ${rowDecision === 'add' ? 'border-green-500 bg-green-600 text-white shadow-sm ring-2 ring-green-200' : 'border-green-200 bg-white text-green-700 hover:bg-green-50'}`}>{rowDecision === 'add' ? <Check size={11} /> : <Plus size={10} />}<span>Добавить в базу</span>{rowDecision === 'add' && <span className="ml-1 rounded bg-white/20 px-1 text-[8px] uppercase">выбрано</span>}</button></>}
+                {!row.next && <><span className="mt-1 block w-fit rounded bg-gray-100 px-1.5 py-0.5 font-sans text-[9px] text-gray-500">Нет в файле</span><div className="mt-2 flex flex-col items-start gap-1"><button disabled={busy} aria-pressed={rowDecision === 'remove'} onClick={() => chooseRow(row.inv, 'remove')} className={`ui-cell-action font-sans ${rowDecision === 'remove' ? 'border-red-600 bg-red-600 text-white shadow-sm ring-2 ring-red-200' : 'border-red-200 bg-white text-red-700 hover:bg-red-50'}`}>{rowDecision === 'remove' ? <Check size={11} /> : <Trash2 size={10} />}<span>Удалить из базы</span>{rowDecision === 'remove' && <span className="ml-1 rounded bg-white/20 px-1 text-[8px] uppercase">выбрано</span>}</button><button disabled={busy} aria-pressed={rowDecision === 'decommission'} onClick={() => chooseRow(row.inv, 'decommission')} className={`ui-cell-action font-sans ${rowDecision === 'decommission' ? 'border-amber-500 bg-amber-400 text-amber-950 shadow-sm ring-2 ring-amber-200' : 'border-gray-200 bg-white text-gray-600 hover:bg-amber-50 hover:text-amber-700'}`}>{rowDecision === 'decommission' ? <Check size={11} /> : <Archive size={10} />}<span>Пометить списанным</span>{rowDecision === 'decommission' && <span className="ml-1 rounded bg-white/30 px-1 text-[8px] uppercase">выбрано</span>}</button></div></>}
               </td>
               {columns.filter(([field]) => field !== 'inventoryNumber').map(([field]) => {
                 const changed = Boolean(row.old && row.next && !same(row.old[field], row.next[field]));
                 const decision = decisions[key(row.inv, field)];
-                const oldValue = displayValue((row.old ?? row.next)![field]) || '—';
-                const nextValue = row.next ? displayValue(row.next[field]) || '(очистить)' : '';
+                const oldValue = displayFieldValue(field, (row.old ?? row.next)![field]) || '—';
+                const nextValue = row.next ? displayFieldValue(field, row.next[field]) || '(очистить)' : '';
                 return <td key={field} className={`min-w-40 border-b border-gray-100 px-3 py-2.5 align-top ${!changed ? 'text-gray-400' : decision === 'accept' ? 'bg-green-50/70' : decision === 'skip' ? 'bg-gray-50 text-gray-400' : 'bg-amber-50/70'}`}>
-                  {!changed ? <div className="max-w-56 whitespace-pre-wrap leading-4">{oldValue}</div> : <><div className="max-w-56 whitespace-pre-wrap text-[10px] leading-4 text-gray-400 line-through decoration-gray-300">{oldValue}</div><div className={`my-0.5 flex items-center gap-1 text-[9px] ${decision === 'accept' ? 'text-green-500' : 'text-amber-500'}`}><ArrowRight size={10} /><span>новое значение</span></div><div className={`max-w-56 whitespace-pre-wrap font-semibold leading-4 ${decision === 'accept' ? 'text-green-800' : decision === 'skip' ? 'text-gray-400' : 'text-gray-800'}`}>{nextValue}</div><div className="mt-2 flex gap-1"><button disabled={busy} className={`ui-cell-action ${decision === 'accept' ? 'border-green-300 bg-green-100 text-green-800' : 'border-gray-200 bg-white text-gray-600 hover:border-green-300 hover:text-green-700'}`} onClick={() => setDecisions(current => ({ ...current, [key(row.inv, field)]: 'accept' }))}><Check size={10} />{decision === 'accept' ? 'Принято' : 'Заменить'}</button><button disabled={busy} className={`ui-cell-action ${decision === 'skip' ? 'border-gray-300 bg-gray-200 text-gray-600' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'}`} onClick={() => setDecisions(current => ({ ...current, [key(row.inv, field)]: 'skip' }))}><SkipForward size={10} />Пропустить</button></div></>}
+                  {!changed ? <div className="max-w-56 whitespace-pre-wrap leading-4">{oldValue}</div> : <><div className="max-w-56 whitespace-pre-wrap text-[10px] leading-4 text-gray-400 line-through decoration-gray-300">{oldValue}</div><div className={`my-0.5 flex items-center gap-1 text-[9px] ${decision === 'accept' ? 'text-green-500' : 'text-amber-500'}`}><ArrowRight size={10} /><span>новое значение</span></div><div className={`max-w-56 whitespace-pre-wrap font-semibold leading-4 ${decision === 'accept' ? 'text-green-800' : decision === 'skip' ? 'text-gray-400' : 'text-gray-800'}`}>{nextValue}</div><div className="mt-2 flex gap-1"><button disabled={busy} aria-pressed={decision === 'accept'} className={`ui-cell-action ${decision === 'accept' ? 'border-green-500 bg-green-600 text-white shadow-sm ring-2 ring-green-200' : 'border-gray-200 bg-white text-gray-600 hover:border-green-300 hover:text-green-700'}`} onClick={() => setDecisions(current => ({ ...current, [key(row.inv, field)]: 'accept' }))}><Check size={10} />Заменить{decision === 'accept' && <span className="ml-0.5 text-[8px] uppercase">✓</span>}</button><button disabled={busy} aria-pressed={decision === 'skip'} className={`ui-cell-action ${decision === 'skip' ? 'border-slate-500 bg-slate-600 text-white shadow-sm ring-2 ring-slate-200' : 'border-gray-200 bg-white text-gray-500 hover:bg-gray-100'}`} onClick={() => setDecisions(current => ({ ...current, [key(row.inv, field)]: 'skip' }))}>{decision === 'skip' ? <Check size={10} /> : <SkipForward size={10} />}Пропустить{decision === 'skip' && <span className="ml-0.5 text-[8px] uppercase">✓</span>}</button></div>{decision && <div className={`mt-1 text-[9px] font-bold uppercase tracking-wide ${decision === 'accept' ? 'text-green-700' : 'text-slate-600'}`}>Выбрано: {decision === 'accept' ? 'заменить' : 'пропустить'}</div>}</>}
                 </td>;
               })}
             </tr>;})}</tbody>

@@ -93,6 +93,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState<string>('all');
+  const [onlyInProcess, setOnlyInProcess] = useState(false);
   const [sort, setSort] = useState<PrinterSort>(initialPrinterSort);
   const [detailsPrinter, setDetailsPrinter] = useState<Printer | null>(null);
 
@@ -144,7 +145,13 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         printerCartridges.some(cartridge => cartridge.id.toLowerCase().includes(q) || cartridge.barcode.toLowerCase().includes(q)) ||
         (p.programId ?? '').toLowerCase().includes(q);
       const matchType = filterType === 'all' || p.printerType === filterType;
-      return matchSearch && matchType;
+      const hasActiveConsumable = printerCartridges.some(cartridge => ['waiting', 'at_refill', 'received_from_refill', 'ready'].includes(cartridge.status));
+      const hasActiveRepair = store.repairs.some(repair => {
+        if (repair.printerInventoryNumber !== p.inventoryNumber || repair.locationStatus === 'issued') return false;
+        if (repair.locationStatus === 'waiting' || repair.locationStatus === 'at_refill' || repair.locationStatus === 'ready') return true;
+        return repair.status === 'waiting' || repair.status === 'in_repair';
+      });
+      return matchSearch && matchType && (!onlyInProcess || hasActiveConsumable || hasActiveRepair);
     });
     if (!sort.key) return result;
     const value = (printer: Printer) => {
@@ -156,7 +163,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       return String(printer[sort.key as keyof Printer] ?? '');
     };
     return [...result].sort((a, b) => printerCollator.compare(value(a), value(b)) * (sort.direction === 'asc' ? 1 : -1));
-  }, [store.printers, employeesByPrinter, cartridgesByPrinter, search, filterType, sort]);
+  }, [store.printers, store.repairs, employeesByPrinter, cartridgesByPrinter, search, filterType, onlyInProcess, sort]);
 
   const toggleSort = (key: PrinterSortKey) => setSort(current => current.key === key
     ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
@@ -173,7 +180,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
   const printerPage = usePage(filteredPrinters);
 
   const getCartridges = (invNum: string) =>
-    (cartridgesByPrinter.get(invNum) ?? []);
+    [...(cartridgesByPrinter.get(invNum) ?? [])].sort((left, right) =>
+      Number(right.consumableType === 'drum') - Number(left.consumableType === 'drum'));
 
 
   const openAdd = () => {
@@ -215,7 +223,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       programId: newPrinter.programId || store.generatePrinterId(),
       isDecommissioned: Boolean(newPrinter.isDecommissioned),
       decommissionedAt: newPrinter.isDecommissioned ? (newPrinter.decommissionedAt || new Date().toISOString()) : undefined,
-      firmwareFlashed: editPrinter?.firmwareFlashed ? true : Boolean(newPrinter.firmwareFlashed),
+      firmwareFlashed: editPrinter?.firmwareFlashed && !store.settings.allowFirmwareUncheck ? true : Boolean(newPrinter.firmwareFlashed),
     };
     store.addPrinter(printer);
 
@@ -280,6 +288,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       status: 'on_hand',
       refillCount: 0,
       registrationDate: new Date().toISOString(),
+      labelPrinted: false,
       history: [{
         id: Math.random().toString(36).substr(2, 9),
         date: new Date().toISOString(),
@@ -305,7 +314,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
         consumableType: addCart.consumableType === 'drum' ? 'Драм-картридж' : 'Картридж',
         status: STATUS_LABELS.on_hand,
       });
-      await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      const result = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+      if (result.success) store.updateCartridge(id, { labelPrinted: true });
     }
 
     setAddCart(null);
@@ -366,6 +376,8 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
     if (!id) return;
     const cart = store.cartridges.find(c => c.id === id);
     if (!cart) return;
+    if (cart.labelPrinted && !await ask(`Внимание! Этикетка на расходник ${cart.id} уже была напечатана. Напечатать повторно?`)) return;
+
     if (!store.settings.labelPrinterName) {
       if (cartId) setPrintStatus({ id: cartId, text: 'Принтер не выбран', ok: false });
       else setCartPrintStatus('Принтер не выбран в Настройках');
@@ -393,6 +405,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
       status: STATUS_LABELS[cart.status],
     });
     const res = await window.desktopAPI.rawPrint(store.settings.labelPrinterName, tspl, store.settings.labelPrintMode);
+    if (res.success) store.updateCartridge(cart.id, { labelPrinted: true });
     store.recordAction({
       category: 'cartridge', entityId: cart.id, cartridgeId: cart.id, cartridgeModel: cart.model,
       consumableType: cart.consumableType, printerInventoryNumber: cart.printerInventoryNumber,
@@ -483,12 +496,17 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
             {printerPage.visible.map(p => {
               const carts = getCartridges(p.inventoryNumber);
               const printerEmployees = (employeesByPrinter.get(p.inventoryNumber) ?? []);
+              const sentToRepair = store.repairs.some(repair =>
+                repair.printerInventoryNumber === p.inventoryNumber &&
+                repair.locationStatus !== 'issued' &&
+                (repair.status === 'waiting' || repair.status === 'in_repair'),
+              );
               return (
                 <tr
                   key={p.inventoryNumber}
                   onClick={event => openDetailsFromRow(event, p)}
-                  className={`cursor-pointer ${p.isDecommissioned ? 'bg-amber-50/60 text-gray-500 hover:bg-amber-50' : 'hover:bg-blue-50/50'}`}
-                  title="Открыть карточку устройства"
+                  className={`cursor-pointer ${p.isDecommissioned ? 'bg-amber-50/60 text-gray-500 hover:bg-amber-50' : sentToRepair ? 'bg-orange-100/70 text-orange-950 hover:bg-orange-100' : 'hover:bg-blue-50/50'}`}
+                  title={sentToRepair ? 'Принтер отправлен в ремонт' : 'Открыть карточку устройства'}
                 >
                   <td className="px-4 py-3">
                     {p.programId ? (
@@ -501,7 +519,7 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                       </button>
                     ) : '—'}
                   </td>
-                  <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}{p.isDecommissioned && <span className="ml-2 inline-flex rounded bg-amber-100 px-1.5 py-0.5 font-sans text-[9px] font-bold uppercase tracking-wide text-amber-800">Списан</span>}</td>
+                  <td className="px-4 py-3 font-mono font-bold">{p.inventoryNumber}{p.isDecommissioned && <span className="ml-2 inline-flex rounded bg-amber-100 px-1.5 py-0.5 font-sans text-[9px] font-bold uppercase tracking-wide text-amber-800">Списан</span>}{sentToRepair && !p.isDecommissioned && <span className="ml-2 inline-flex rounded bg-orange-200 px-1.5 py-0.5 font-sans text-[9px] font-bold uppercase tracking-wide text-orange-800">На ремонте</span>}</td>
                   <td className="px-4 py-3"><PrinterTypeBadge type={p.printerType} /></td>
                   <td className="px-4 py-3 font-semibold"><span className="inline-flex min-w-0 items-center gap-1.5"><span className="truncate">{p.model}</span>{p.firmwareFlashed && <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500 ring-2 ring-red-200" title="Прошит" aria-label="Прошит" />}</span></td>
                   <td className="px-4 py-3 text-gray-600">{p.department || '—'}</td>
@@ -584,6 +602,10 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
               </button>
             ))}
           </div>
+          <label className={`flex cursor-pointer select-none items-center gap-2 rounded-lg border px-3 py-2 text-xs font-semibold transition ${onlyInProcess ? 'border-orange-300 bg-orange-50 text-orange-800 ring-1 ring-orange-100' : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50'}`}>
+            <input type="checkbox" checked={onlyInProcess} onChange={event => setOnlyInProcess(event.target.checked)} className="h-3.5 w-3.5 rounded accent-orange-600" />
+            <span>Только в процессе</span>
+          </label>
         </div>
         <button
           onClick={openAdd}
@@ -671,29 +693,62 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
 
                 <div className="min-w-0 space-y-4">
                   <div>
-                    <div className="text-xs uppercase text-gray-400 font-bold mb-2">Расходники ({carts.length})</div>
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="text-xs font-bold uppercase text-gray-400">Расходники ({carts.length})</div>
+                      <button
+                        type="button"
+                        onClick={() => { setDetailsPrinter(null); openAddCart(detailsPrinter.inventoryNumber); }}
+                        className="ui-cell-action border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                      >
+                        <Plus size={11} />Добавить расходник
+                      </button>
+                    </div>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-1.5 max-h-72 overflow-y-auto pr-1">
                       {carts.map(c => (
-                        <div data-testid="printer-consumable" key={c.id} className="p-2 text-xs border rounded-lg bg-white hover:bg-gray-50">
-                          <div className="flex items-center justify-between gap-2">
-                            <button onClick={() => handlePrintCartridge(c.id)} className="min-w-0 truncate font-mono text-[11px] font-bold text-blue-700 hover:underline flex items-center gap-1">
-                              <ColorDot color={c.color} /> {getConsumableLabel(c, carts)}
+                        <div data-testid="printer-consumable" key={c.id} className="group relative overflow-hidden rounded-lg border border-slate-200 bg-white px-2.5 py-2 text-xs shadow-sm transition hover:border-blue-200 hover:bg-blue-50/20 hover:shadow">
+                          <span className={`absolute inset-y-0 left-0 w-0.5 ${c.consumableType === 'drum' ? 'bg-orange-400' : 'bg-blue-400'}`} />
+                          <div className="flex min-w-0 items-center justify-between gap-2">
+                            <button onClick={() => handlePrintCartridge(c.id)} className="flex min-w-0 items-center gap-1 truncate font-mono text-[11px] font-bold text-blue-700 hover:underline">
+                              <ColorDot color={c.color} /> <span className="truncate">{getConsumableLabel(c, carts)}</span>
                             </button>
-                            <span className={`ui-mini-pill shrink-0 px-1.5 py-0.5 rounded-full text-[9px] font-bold ${STATUS_COLORS[c.status]}`}>{STATUS_LABELS[c.status]}</span>
+                            <span className={`ui-mini-pill shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${STATUS_COLORS[c.status]}`}>{STATUS_LABELS[c.status]}</span>
                           </div>
-                          <div className="mt-1 truncate text-[11px] text-gray-700" title={c.model || 'Без модели'}>{c.model || 'Без модели'}</div>
-                          <div className="mt-0.5 truncate text-[9px] leading-3 text-gray-400" title={`ID расходника: ${c.id}`}>
-                            ID: <span className="font-mono text-gray-500">{c.id}</span>
+
+                          <div className="mt-1 truncate text-[11px] font-semibold leading-4 text-slate-700" title={c.model || 'Без модели'}>{c.model || 'Без модели'}</div>
+                          <div className="truncate text-[9px] leading-3 text-slate-400" title={`ID расходника: ${c.id}`}>
+                            ID: <span className="font-mono text-slate-500">{c.id}</span>
                           </div>
-                          <button className="mt-1 text-[10px] text-blue-700 hover:underline" onClick={() => {
-                            setDetailsPrinter(null);
-                            setEditCartridgeId(c.id);
-                            setEditCartridgeModel(c.model);
-                            setEditCartridgeColor(c.color ?? '');
-                            setEditPin('');
-                            setCartPrintStatus(null);
-                          }}>Редактировать расходник</button>
-                          <div className="text-[10px] leading-4 text-gray-400">{c.consumableType === 'drum' ? 'Драм' : 'Картридж'} · заправок: {c.refillCount}</div>
+
+                          <label className="mt-1.5 flex w-fit cursor-pointer select-none items-center gap-1.5 text-[9px] leading-3 text-slate-500" title="Этикетка напечатана">
+                            <input
+                              type="checkbox"
+                              aria-label={`Этикетка напечатана ${c.id}`}
+                              className="h-3 w-3 cursor-pointer rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                              checked={Boolean(c.labelPrinted)}
+                              onChange={event => store.updateCartridge(c.id, { labelPrinted: event.target.checked })}
+                            />
+                            <span>Этикетка напечатана</span>
+                          </label>
+
+                          <div className="mt-1.5 flex items-center justify-between border-t border-slate-100 pt-1.5">
+                            <span className="text-[9px] leading-3 text-slate-400">{c.consumableType === 'drum' ? 'Драм' : 'Картридж'} · заправок: {c.refillCount}</span>
+                            <button
+                              type="button"
+                              aria-label={`Настройки расходника ${c.id}`}
+                              title="Настройки расходника"
+                              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-slate-400 transition hover:bg-blue-100 hover:text-blue-700"
+                              onClick={() => {
+                                setDetailsPrinter(null);
+                                setEditCartridgeId(c.id);
+                                setEditCartridgeModel(c.model);
+                                setEditCartridgeColor(c.color ?? '');
+                                setEditPin('');
+                                setCartPrintStatus(null);
+                              }}
+                            >
+                              <Edit2 size={11} />
+                            </button>
+                          </div>
                         </div>
                       ))}
                       {carts.length === 0 && <div className="text-gray-300 italic text-sm">Нет расходников</div>}
@@ -802,14 +857,14 @@ const PrintersTab: React.FC<{ store: StoreType }> = ({ store }) => {
                 />
               </div>
 
-              <label className={`flex items-start gap-2 rounded-xl border px-3 py-2.5 ${editPrinter?.firmwareFlashed ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-500' : 'cursor-pointer border-purple-200 bg-purple-50/60 text-gray-800'}`}>
-                <input type="checkbox" checked={Boolean(editPrinter?.firmwareFlashed || newPrinter.firmwareFlashed)} disabled={Boolean(editPrinter?.firmwareFlashed)} onChange={event => setNewPrinter({ ...newPrinter, firmwareFlashed: event.target.checked })} className="mt-0.5 h-4 w-4 rounded accent-purple-600" />
-                <span><span className="block text-sm font-semibold">Принтер прошит (прошивка выполнена)</span>{editPrinter?.firmwareFlashed && <span className="mt-0.5 block text-[10px] text-gray-400">Отметка уже зафиксирована и защищена от случайного снятия.</span>}</span>
+              <label className={`flex items-start gap-2 rounded-xl border px-3 py-2.5 ${editPrinter?.firmwareFlashed && !store.settings.allowFirmwareUncheck ? 'cursor-not-allowed border-gray-200 bg-gray-50 text-gray-500' : 'cursor-pointer border-purple-200 bg-purple-50/60 text-gray-800'}`}>
+                <input type="checkbox" checked={Boolean(newPrinter.firmwareFlashed)} disabled={Boolean(editPrinter?.firmwareFlashed && !store.settings.allowFirmwareUncheck)} onChange={event => setNewPrinter({ ...newPrinter, firmwareFlashed: event.target.checked })} className="mt-0.5 h-4 w-4 rounded accent-purple-600" />
+                <span><span className="block text-sm font-semibold">Принтер прошит (прошивка выполнена)</span>{editPrinter?.firmwareFlashed && !store.settings.allowFirmwareUncheck && <span className="mt-0.5 block text-[10px] text-gray-400">Снятие отметки запрещено. Разрешить его можно в настройках приложения.</span>}</span>
               </label>
 
-              <label className={`flex cursor-pointer items-center justify-between rounded-xl border px-3 py-2.5 ${newPrinter.isDecommissioned ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50/60'}`}>
+              <label className={`flex cursor-pointer items-start gap-2 rounded-xl border px-3 py-2.5 ${newPrinter.isDecommissioned ? 'border-amber-300 bg-amber-50' : 'border-gray-200 bg-gray-50/60'}`}>
+                <input type="checkbox" checked={Boolean(newPrinter.isDecommissioned)} onChange={event => setNewPrinter({ ...newPrinter, isDecommissioned: event.target.checked, decommissionedAt: event.target.checked ? (newPrinter.decommissionedAt || new Date().toISOString()) : undefined })} className="mt-0.5 h-4 w-4 rounded accent-amber-600" />
                 <span><span className="block text-sm font-semibold text-gray-700">Списан</span><span className="block text-[10px] text-gray-400">Устройство останется в базе и будет выделено в списке</span></span>
-                <input type="checkbox" checked={Boolean(newPrinter.isDecommissioned)} onChange={event => setNewPrinter({ ...newPrinter, isDecommissioned: event.target.checked, decommissionedAt: event.target.checked ? (newPrinter.decommissionedAt || new Date().toISOString()) : undefined })} className="h-4 w-4 accent-amber-600" />
               </label>
 
               <div className="flex space-x-2 pt-2">
